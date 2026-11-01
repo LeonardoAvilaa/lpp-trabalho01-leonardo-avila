@@ -96,6 +96,31 @@ def fato(causa, /, **extras):
     return {**extras, "estado": snapshot(), "causa": causa}
 
 
+# ── Helpers de domínio ────────────────────────────────────────────────
+def proximo_lote_livre() -> str | None:
+    """Retorna o primeiro lote vago em ordem numérica crescente, ou None."""
+    for lote in LOTES:
+        if vila["lotes"][lote] is None:
+            return lote
+    return None
+
+
+def _nova_vaga(numero: int) -> dict:
+    """Cria a estrutura inicial padrão de uma vaga de lapidação."""
+    return {
+        "numero": numero,
+        "ocupada": False,
+        "inicio_monotonic": None,
+        "disponivel_desde": None,
+        "ciclo_id": 0,
+    }
+
+
+def _remover_obra_ativa(lista: list, lid: str):
+    """Remove registro de obra ativa por `lid` no lugar."""
+    lista[:] = [r for r in lista if r["lid"] != lid]
+
+
 # ── Conexão e sincronização ───────────────────────────────────────────
 @sio.event
 async def connect(sid, environ, auth):
@@ -184,3 +209,95 @@ async def mina():
             await sio.emit("mina.cristal_produzido", fato("temporizador", quantidade=1))
     except asyncio.CancelledError:
         pass
+
+
+# ── Construção de lapidárias ──────────────────────────────────────────
+@sio.on("construcao.solicitada")
+async def solicitar_construcao(sid, dados=None):
+    pedido = "construcao.solicitada"
+
+    # 1. Validar solicitante: deve ser exatamente jogador conectado
+    jogador = jogadores.get(sid)
+    if not jogador or jogador.get("papel") != "jogador":
+        await sio.emit("construcao.recusada", fato(pedido, motivo="Apenas jogadores podem solicitar construções."), to=sid)
+        return
+
+    # 2. Validar fase da vila
+    if vila["fase"] != "aberta":
+        await sio.emit("construcao.recusada", fato(pedido, motivo="Construções só são permitidas com a vila aberta."), to=sid)
+        return
+
+    # 3. Validar recursos
+    if vila["brutos"] < CUSTO_CONSTRUCAO:
+        await sio.emit("construcao.recusada", fato(pedido, motivo="Cristais brutos insuficientes (necessário: 5)."), to=sid)
+        return
+
+    # 4. Validar trabalhadores
+    if vila["trabalhadores"] >= LIMITE_TRABALHADORES:
+        await sio.emit("construcao.recusada", fato(pedido, motivo="Todos os trabalhadores estão ocupados (limite: 2)."), to=sid)
+        return
+
+    # 5. Validar lotes
+    lote = proximo_lote_livre()
+    if lote is None:
+        await sio.emit("construcao.recusada", fato(pedido, motivo="Não há lotes disponíveis para construção (limite: 6)."), to=sid)
+        return
+
+    # Mutação atômica e agendamento da tarefa (sem await no meio):
+    inicio = time.monotonic()
+    lid = f"lapidaria-{vila['proximo_id']}"
+    vila["proximo_id"] += 1
+    vila["brutos"] -= CUSTO_CONSTRUCAO
+    vila["trabalhadores"] += 1
+    vila["lotes"][lote] = lid
+    lap = {
+        "id": lid,
+        "lote": lote,
+        "nivel": 1,
+        "situacao": "em construção",
+        "tarefa_id": 1,
+        "vagas": [_nova_vaga(1)],
+    }
+    vila["lapidarias"][lid] = lap
+    vila["construcoes_ativas"].append({"lid": lid, "inicio_monotonic": inicio})
+
+    inicio_emitido = asyncio.Event()
+    sio.start_background_task(obra_construcao, lid, lap["tarefa_id"], inicio, inicio_emitido)
+
+    try:
+        await sio.emit("construcao.iniciada", fato(
+            pedido,
+            solicitante=jogador["nome"],
+            lapidaria_id=lid,
+            lote=lote,
+            custo=CUSTO_CONSTRUCAO,
+        ))
+    finally:
+        inicio_emitido.set()
+
+
+async def obra_construcao(lid, token_obra, inicio_monotonic, inicio_emitido):
+    restante = max(0.0, TEMPO_OBRA - (time.monotonic() - inicio_monotonic))
+    await sio.sleep(restante)
+    await inicio_emitido.wait()
+
+    lap = vila["lapidarias"].get(lid)
+    if not lap or lap["tarefa_id"] != token_obra:
+        return
+
+    _remover_obra_ativa(vila["construcoes_ativas"], lid)
+    vila["trabalhadores"] -= 1
+    lap["situacao"] = "disponível"
+
+    if vila["fase"] == "aberta":
+        lap["vagas"][0]["disponivel_desde"] = time.monotonic()
+    else:
+        lap["vagas"][0]["disponivel_desde"] = None
+
+    await sio.emit("construcao.concluida", fato(
+        "temporizador",
+        lapidaria_id=lid,
+        lote=lap["lote"],
+        nivel=1,
+        situacao="disponível",
+    ))
