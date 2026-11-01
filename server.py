@@ -27,6 +27,9 @@ LOTES = [f"lote{n}" for n in range(1, LIMITE_LOTES + 1)]
 jogadores = {}      # sid -> {"nome": str, "papel": "mestre" | "jogador"}
 mestre_sid = None   # SID do Mestre atual (None se nenhum)
 tarefa_mina = None  # Task da mina em execução (None se inativa)
+_tarefa_dispatcher = None
+_dispatcher_pendente = False
+_vagas_coalescidas = []
 
 # ── Estado da vila ────────────────────────────────────────────────────
 vila = {
@@ -181,7 +184,7 @@ async def abrir_vila(sid, dados=None):
 
 @sio.on("vila.encerramento_solicitado")
 async def encerrar_vila(sid, dados=None):
-    global tarefa_mina
+    global tarefa_mina, _tarefa_dispatcher, _dispatcher_pendente, _vagas_coalescidas
     pedido = "vila.encerramento_solicitado"
 
     if sid != mestre_sid:
@@ -195,6 +198,23 @@ async def encerrar_vila(sid, dados=None):
     if tarefa_mina is not None and not tarefa_mina.done():
         tarefa_mina.cancel()
         tarefa_mina = None
+
+    _dispatcher_pendente = False
+    _vagas_coalescidas.clear()
+    if _tarefa_dispatcher is not None and not _tarefa_dispatcher.done():
+        _tarefa_dispatcher.cancel()
+        _tarefa_dispatcher = None
+
+    # Estorno e invalidação de todas as lapidações ativas
+    for lap in vila["lapidarias"].values():
+        for vaga in lap["vagas"]:
+            if vaga["ocupada"]:
+                vila["brutos"] += 1
+                vaga["ocupada"] = False
+                vaga["inicio_monotonic"] = None
+                vaga["ciclo_id"] += 1
+            vaga["disponivel_desde"] = None
+
     await sio.emit("vila.encerrada", fato(pedido))
 
 
@@ -207,6 +227,7 @@ async def mina():
                 break
             vila["brutos"] += 1
             await sio.emit("mina.cristal_produzido", fato("temporizador", quantidade=1))
+            agendar_dispatcher_fifo()
     except asyncio.CancelledError:
         pass
 
@@ -289,15 +310,179 @@ async def obra_construcao(lid, token_obra, inicio_monotonic, inicio_emitido):
     vila["trabalhadores"] -= 1
     lap["situacao"] = "disponível"
 
+    ev_conclusao = None
     if vila["fase"] == "aberta":
         lap["vagas"][0]["disponivel_desde"] = time.monotonic()
+        ev_conclusao = asyncio.Event()
+        registrar_vaga_liberada(lid, 1, ev_conclusao)
     else:
         lap["vagas"][0]["disponivel_desde"] = None
 
-    await sio.emit("construcao.concluida", fato(
-        "temporizador",
-        lapidaria_id=lid,
-        lote=lap["lote"],
-        nivel=1,
-        situacao="disponível",
-    ))
+    try:
+        await sio.emit("construcao.concluida", fato(
+            "temporizador",
+            lapidaria_id=lid,
+            lote=lap["lote"],
+            nivel=1,
+            situacao="disponível",
+        ))
+    finally:
+        if ev_conclusao is not None:
+            ev_conclusao.set()
+        if vila["fase"] == "aberta":
+            agendar_dispatcher_fifo()
+
+
+# ── Processamento de lapidação e fila FIFO ────────────────────────────
+def _vagas_disponiveis_ordenadas() -> list[tuple[str, dict]]:
+    """Retorna lista de (lid, vaga) ordenada pela política FIFO global."""
+    resultado = []
+    if vila["fase"] != "aberta":
+        return resultado
+    for lid, lap in vila["lapidarias"].items():
+        if lap["situacao"] != "disponível":
+            continue
+        try:
+            numero_lote = int(lap["lote"].replace("lote", ""))
+        except (ValueError, AttributeError):
+            numero_lote = 999
+        for vaga in lap["vagas"]:
+            if not vaga["ocupada"] and vaga["disponivel_desde"] is not None:
+                resultado.append((lid, vaga, numero_lote))
+    resultado.sort(key=lambda x: (x[1]["disponivel_desde"], x[2], x[1]["numero"]))
+    return [(lid, vaga) for lid, vaga, _ in resultado]
+
+
+def _alocar_fifo() -> list[dict]:
+    """Síncrona. Aloca cristais brutos às vagas disponíveis pela ordem FIFO."""
+    alocacoes = []
+    if vila["fase"] != "aberta":
+        return alocacoes
+    vagas = _vagas_disponiveis_ordenadas()
+    for lid, vaga in vagas:
+        if vila["brutos"] <= 0 or vila["fase"] != "aberta":
+            break
+        vila["brutos"] -= 1
+        vaga["ocupada"] = True
+        vaga["ciclo_id"] += 1
+        vaga["inicio_monotonic"] = time.monotonic()
+        vaga["disponivel_desde"] = None
+        alocacoes.append({
+            "lid": lid,
+            "numero_vaga": vaga["numero"],
+            "ciclo_id": vaga["ciclo_id"],
+        })
+    return alocacoes
+
+
+def registrar_vaga_liberada(lid: str, vaga_num: int, ev_conclusao: asyncio.Event):
+    """Registra síncronamente uma vaga em processo de liberação antes de qualquer await."""
+    if vila["fase"] == "aberta":
+        _vagas_coalescidas.append((lid, vaga_num, ev_conclusao))
+
+
+def agendar_dispatcher_fifo():
+    """Agenda o dispatcher com coalescing em background se a vila estiver aberta."""
+    global _dispatcher_pendente, _tarefa_dispatcher
+    if vila["fase"] != "aberta":
+        return
+    _dispatcher_pendente = True
+    if _tarefa_dispatcher is None or _tarefa_dispatcher.done():
+        _tarefa_dispatcher = sio.start_background_task(_ciclo_dispatcher_fifo)
+
+
+async def _ciclo_dispatcher_fifo():
+    """Ciclo de execução do dispatcher com agendamento agrupado (coalescing)."""
+    global _dispatcher_pendente, _tarefa_dispatcher, _vagas_coalescidas
+    try:
+        while _dispatcher_pendente and vila["fase"] == "aberta":
+            _dispatcher_pendente = False
+
+            # Aguarda a conclusão efetiva da emissão na rede de todas as vagas registradas neste lote
+            while _vagas_coalescidas:
+                pendentes = [ev for _, _, ev in _vagas_coalescidas if not ev.is_set()]
+                if not pendentes:
+                    break
+                await asyncio.gather(*(ev.wait() for ev in pendentes))
+
+            if vila["fase"] != "aberta":
+                break
+
+            # Vagas liberadas no mesmo lote de coalescing recebem o mesmo timestamp
+            # para desempate determinístico por lote e vaga, sem depender de microssegundos.
+            if len(_vagas_coalescidas) > 1:
+                ts_lote = time.monotonic()
+                for lid, num, _ in _vagas_coalescidas:
+                    lap = vila["lapidarias"].get(lid)
+                    if lap and num <= len(lap["vagas"]):
+                        v = lap["vagas"][num - 1]
+                        if not v["ocupada"]:
+                            v["disponivel_desde"] = ts_lote
+            _vagas_coalescidas.clear()
+
+            alocacoes = _alocar_fifo()
+            for a in alocacoes:
+                if vila["fase"] != "aberta":
+                    break
+
+                lap = vila["lapidarias"].get(a["lid"])
+                if not lap or a["numero_vaga"] > len(lap["vagas"]):
+                    continue
+                vaga = lap["vagas"][a["numero_vaga"] - 1]
+                if not vaga["ocupada"] or vaga["ciclo_id"] != a["ciclo_id"]:
+                    continue
+
+                await sio.emit("lapidaria.processamento_iniciado", fato(
+                    "temporizador",
+                    lapidaria_id=a["lid"],
+                    vaga=a["numero_vaga"],
+                ))
+
+                if vila["fase"] == "aberta" and vaga["ocupada"] and vaga["ciclo_id"] == a["ciclo_id"]:
+                    sio.start_background_task(lapidacao, a["lid"], a["numero_vaga"], a["ciclo_id"])
+    except asyncio.CancelledError:
+        pass
+    finally:
+        _tarefa_dispatcher = None
+
+
+async def dispatcher_fifo():
+    """Interface assíncrona para acionamento do dispatcher com garantia de execução."""
+    agendar_dispatcher_fifo()
+    while _tarefa_dispatcher is not None and not _tarefa_dispatcher.done():
+        try:
+            await asyncio.shield(_tarefa_dispatcher)
+        except asyncio.CancelledError:
+            break
+
+
+async def lapidacao(lid: str, numero_vaga: int, ciclo_id_param: int):
+    """Corrotina de ciclo de lapidação em uma vaga."""
+    lap = vila["lapidarias"].get(lid)
+    if not lap or numero_vaga > len(lap["vagas"]):
+        return
+    vaga = lap["vagas"][numero_vaga - 1]
+    token_local = ciclo_id_param
+
+    await sio.sleep(TEMPO_LAPIDACAO)
+
+    if vaga["ciclo_id"] != token_local or vila["fase"] != "aberta":
+        return
+
+    vila["lapidados"] += 1
+    vaga["ocupada"] = False
+    vaga["inicio_monotonic"] = None
+    vaga["disponivel_desde"] = time.monotonic()
+
+    ev_conclusao = asyncio.Event()
+    registrar_vaga_liberada(lid, numero_vaga, ev_conclusao)
+
+    try:
+        await sio.emit("lapidaria.cristal_lapidado", fato(
+            "temporizador",
+            lapidaria_id=lid,
+            vaga=numero_vaga,
+        ))
+    finally:
+        ev_conclusao.set()
+        agendar_dispatcher_fifo()
