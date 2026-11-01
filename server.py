@@ -9,6 +9,7 @@ app = socketio.ASGIApp(sio, static_files={
 # A partir da Etapa 1, adicione o seu código ABAIXO desta linha.
 
 import time
+import asyncio
 from socketio.exceptions import ConnectionRefusedError as SioConnectionRefusedError
 
 # ── Constantes de domínio ─────────────────────────────────────────────
@@ -25,6 +26,7 @@ LOTES = [f"lote{n}" for n in range(1, LIMITE_LOTES + 1)]
 # ── Participantes ─────────────────────────────────────────────────────
 jogadores = {}      # sid -> {"nome": str, "papel": "mestre" | "jogador"}
 mestre_sid = None   # SID do Mestre atual (None se nenhum)
+tarefa_mina = None  # Task da mina em execução (None se inativa)
 
 # ── Estado da vila ────────────────────────────────────────────────────
 vila = {
@@ -131,3 +133,54 @@ async def disconnect(sid, reason=None):
     jogadores.pop(sid, None)
     if sid == mestre_sid:
         mestre_sid = None
+
+
+# ── Abertura e encerramento da temporada ──────────────────────────────
+@sio.on("vila.abertura_solicitada")
+async def abrir_vila(sid, dados=None):
+    global tarefa_mina
+    pedido = "vila.abertura_solicitada"
+
+    if sid != mestre_sid:
+        await sio.emit("vila.abertura_recusada", fato(pedido, motivo="Apenas o Mestre pode abrir a temporada."), to=sid)
+        return
+    if vila["fase"] != "aguardando":
+        await sio.emit("vila.abertura_recusada", fato(pedido, motivo="A vila só pode ser aberta na fase 'aguardando'."), to=sid)
+        return
+
+    vila["fase"] = "aberta"
+    if tarefa_mina is None or tarefa_mina.done():
+        tarefa_mina = sio.start_background_task(mina)
+    await sio.emit("vila.aberta", fato(pedido))
+
+
+@sio.on("vila.encerramento_solicitado")
+async def encerrar_vila(sid, dados=None):
+    global tarefa_mina
+    pedido = "vila.encerramento_solicitado"
+
+    if sid != mestre_sid:
+        await sio.emit("vila.encerramento_recusado", fato(pedido, motivo="Apenas o Mestre pode encerrar a temporada."), to=sid)
+        return
+    if vila["fase"] != "aberta":
+        await sio.emit("vila.encerramento_recusado", fato(pedido, motivo="A vila só pode ser encerrada na fase 'aberta'."), to=sid)
+        return
+
+    vila["fase"] = "encerrada"
+    if tarefa_mina is not None and not tarefa_mina.done():
+        tarefa_mina.cancel()
+        tarefa_mina = None
+    await sio.emit("vila.encerrada", fato(pedido))
+
+
+# ── Temporizador da mina ──────────────────────────────────────────────
+async def mina():
+    try:
+        while vila["fase"] == "aberta":
+            await sio.sleep(INTERVALO_MINA)
+            if vila["fase"] != "aberta":
+                break
+            vila["brutos"] += 1
+            await sio.emit("mina.cristal_produzido", fato("temporizador", quantidade=1))
+    except asyncio.CancelledError:
+        pass
