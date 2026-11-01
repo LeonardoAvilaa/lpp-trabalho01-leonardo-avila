@@ -406,6 +406,9 @@
         });
 
         // ETAPA 6.3: ouvir "mina.cristal_produzido"
+        ouvir("mina.cristal_produzido", "Atualiza estoque com novo cristal extraído", (d) => {
+          atualizar(d);
+        });
         // ETAPA 6.4: ouvir "construcao.iniciada", "construcao.concluida", "construcao.recusada"
         // ETAPA 6.5: ouvir lapidação e melhorias
       }

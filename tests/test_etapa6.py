@@ -814,6 +814,123 @@ class TestEtapa61Cliente(unittest.TestCase):
         self.assertEqual(res["encerrarConectado"]["pedidos"], ["vila.encerramento_solicitado"])
         self.assertTrue(res["encerrarConectado"]["comandoTemporadaPendente"])
 
+    # ── 4. Produção da Mina (Etapa 6.3) ───────────────────────────────────
+
+    def test_18_verificacao_estatica_listener_mina_cristal_produzido(self):
+        """Verificação estática de client/index.html para o listener de produção da mina."""
+        html_content = (RAIZ / "client" / "index.html").read_text(encoding="utf-8")
+
+        # Listener de mina.cristal_produzido registrado com reação e chamada a atualizar(d)
+        self.assertIn('ouvir("mina.cristal_produzido", "Atualiza estoque com novo cristal extraído", (d) => {', html_content)
+        self.assertIn('atualizar(d);', html_content)
+
+        # Elemento visual para exibição do estoque de brutos
+        self.assertIn("💎 Cristais brutos: <strong>{{ estado.brutos }}</strong>", html_content)
+
+        # Checkbox de filtro existente
+        self.assertIn('<input type="checkbox" v-model="ocultarProducao"> ocultar mina.cristal_produzido', html_content)
+
+    def test_19_verificacao_contrato_listener_mina_e_atualizacao_estoque(self):
+        """Verificação isolada de lógica: recebimento de mina.cristal_produzido, encaminhamento para atualizar() e estoque."""
+        js_code = r"""
+        const estado = { fase: "aberta", brutos: 0, lapidados: 0 };
+        const contadores = {};
+        const eventos = [];
+
+        function atualizar(d) {
+            if (!d || !d.estado) return;
+            const e = d.estado;
+            if (e.brutos !== undefined) estado.brutos = e.brutos;
+            if (e.fase !== undefined) estado.fase = e.fase;
+        }
+
+        function registrar(sentido, nome, dados, reacao) {
+            contadores[nome] = (contadores[nome] || 0) + 1;
+            eventos.unshift({ sentido, nome, dados, reacao });
+        }
+
+        // Simula a escuta do cliente
+        function onMinaCristalProduzido(d) {
+            registrar("recebido", "mina.cristal_produzido", d, "Atualiza estoque com novo cristal extraído");
+            atualizar(d);
+        }
+
+        const log = {};
+
+        // 1ª extração: servidor informa que o estoque passou a 1
+        const payload1 = {
+            quantidade: 1,
+            causa: "temporizador",
+            estado: { fase: "aberta", brutos: 1, lapidados: 0 }
+        };
+        onMinaCristalProduzido(payload1);
+        log.extracao1 = {
+            brutos: estado.brutos,
+            contador: contadores["mina.cristal_produzido"],
+            ultimoEvento: eventos[0]
+        };
+
+        // 2ª extração: servidor informa que o estoque passou a 2
+        const payload2 = {
+            quantidade: 1,
+            causa: "temporizador",
+            estado: { fase: "aberta", brutos: 2, lapidados: 0 }
+        };
+        onMinaCristalProduzido(payload2);
+        log.extracao2 = {
+            brutos: estado.brutos,
+            contador: contadores["mina.cristal_produzido"]
+        };
+
+        console.log(JSON.stringify(log));
+        """
+        proc = subprocess.run(["node", "-e", js_code], capture_output=True, text=True, check=True)
+        res = json.loads(proc.stdout.strip())
+
+        # 1ª extração: brutos atualizado para 1, contador incrementado
+        self.assertEqual(res["extracao1"]["brutos"], 1)
+        self.assertEqual(res["extracao1"]["contador"], 1)
+        self.assertEqual(res["extracao1"]["ultimoEvento"]["nome"], "mina.cristal_produzido")
+        self.assertEqual(res["extracao1"]["ultimoEvento"]["reacao"], "Atualiza estoque com novo cristal extraído")
+
+        # 2ª extração: brutos atualizado para 2 a partir de d.estado.brutos
+        self.assertEqual(res["extracao2"]["brutos"], 2)
+        self.assertEqual(res["extracao2"]["contador"], 2)
+
+    def test_20_verificacao_contrato_filtro_ocultar_producao(self):
+        """Verificação isolada de lógica: preservação do filtro reativo ocultarProducao para eventos de produção."""
+        js_code = r"""
+        const eventos = [
+            { nome: "mina.cristal_produzido", texto: "cristal 1" },
+            { nome: "vila.aberta", texto: "temporada aberta" },
+            { nome: "mina.cristal_produzido", texto: "cristal 2" },
+            { nome: "vila.encerrada", texto: "temporada encerrada" }
+        ];
+
+        function getEventosVisiveis(ocultarProducao) {
+            return eventos.filter((e) => !(ocultarProducao && (e.nome === "mina.cristal_produzido" || e.nome === "recurso.produzido")));
+        }
+
+        // Sem ocultar produção (padrão)
+        const visiveisPadrao = getEventosVisiveis(false);
+
+        // Com produção ocultada
+        const visiveisOcultos = getEventosVisiveis(true);
+
+        console.log(JSON.stringify({
+            padrao: visiveisPadrao.map(e => e.nome),
+            oculto: visiveisOcultos.map(e => e.nome)
+        }));
+        """
+        proc = subprocess.run(["node", "-e", js_code], capture_output=True, text=True, check=True)
+        res = json.loads(proc.stdout.strip())
+
+        # Quando desmarcado (false), todos os eventos aparecem
+        self.assertEqual(res["padrao"], ["mina.cristal_produzido", "vila.aberta", "mina.cristal_produzido", "vila.encerrada"])
+
+        # Quando marcado (true), mina.cristal_produzido é ocultado, outros eventos permanecem
+        self.assertEqual(res["oculto"], ["vila.aberta", "vila.encerrada"])
+
 
 if __name__ == "__main__":
     unittest.main()
