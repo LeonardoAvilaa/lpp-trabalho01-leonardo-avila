@@ -10,6 +10,7 @@
     .erro-login { color: #c62828; background: #ffebee; border: 1px solid #ef9a9a; border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; font-size: 13px; }
     .painel p { margin: 6px 0; }
     button { padding: 8px 14px; margin-right: 6px; border-radius: 6px; border: 1px solid #888; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
     input { padding: 8px; margin-bottom: 8px; width: 100%; box-sizing: border-box; }
     .avisos { list-style: none; padding: 0; }
     .avisos li { padding: 6px 10px; margin: 4px 0; border-radius: 6px; background: #eef; }
@@ -69,8 +70,8 @@
 
     <section>
       <template v-if="papel === 'mestre'">
-        <button @click="abrirVila">Abrir temporada</button>
-        <button @click="encerrarVila">Encerrar temporada</button>
+        <button v-if="estado.fase === 'aguardando'" :disabled="comandoTemporadaPendente" @click="abrirVila">Abrir temporada</button>
+        <button v-else-if="estado.fase === 'aberta'" :disabled="comandoTemporadaPendente" @click="encerrarVila">Encerrar temporada</button>
       </template>
       <button v-else @click="construir">🔨 Construir</button>
     </section>
@@ -270,6 +271,7 @@
       const ocultarProducao = ref(false);
       const eventosVisiveis = computed(() =>
         eventos.value.filter((e) => !(ocultarProducao.value && (e.nome === "mina.cristal_produzido" || e.nome === "recurso.produzido"))));
+      const comandoTemporadaPendente = ref(false);
       const jogo = criarJogo();      // a vila desenhada (Phaser)
       let socket = null;
 
@@ -335,6 +337,7 @@
 
       function entrar(p) {
         erroEntrada.value = "";
+        comandoTemporadaPendente.value = false;
         const nomeLimpo = (nome.value || "").trim();
         if (!nomeLimpo) {
           erroEntrada.value = "Informe um nome válido para entrar.";
@@ -353,11 +356,17 @@
 
         socket.on("connect_error", (err) => {
           conectado.value = false;
+          comandoTemporadaPendente.value = false;
           erroEntrada.value = (err && err.message) ? err.message : "Conexão recusada pelo servidor.";
           if (socket) {
             socket.disconnect();
             socket = null;
           }
+        });
+
+        socket.on("disconnect", () => {
+          conectado.value = false;
+          comandoTemporadaPendente.value = false;
         });
 
         socket.on("connect", () => {
@@ -369,10 +378,33 @@
         // ===== ESCUTAS (on): o cliente reage aos FATOS do servidor =====
         // ETAPA 6.1: ouvir "estado.sincronizado" para sincronização do snapshot
         ouvir("estado.sincronizado", "Sincroniza estado inicial da vila", (d) => {
+          comandoTemporadaPendente.value = false;
           atualizar(d);
         });
 
         // ETAPA 6.2: ouvir "vila.aberta", "vila.encerrada" e recusas
+        ouvir("vila.aberta", "Confirma a abertura da temporada", (d) => {
+          comandoTemporadaPendente.value = false;
+          atualizar(d);
+          avisar("Temporada da vila aberta!", "ok");
+        });
+
+        ouvir("vila.abertura_recusada", "Informa recusa na abertura da temporada", (d) => {
+          comandoTemporadaPendente.value = false;
+          avisar(d && d.motivo ? d.motivo : "Abertura da temporada recusada.", "erro");
+        });
+
+        ouvir("vila.encerrada", "Confirma o encerramento da temporada", (d) => {
+          comandoTemporadaPendente.value = false;
+          atualizar(d);
+          avisar("Temporada da vila encerrada!", "info");
+        });
+
+        ouvir("vila.encerramento_recusado", "Informa recusa no encerramento da temporada", (d) => {
+          comandoTemporadaPendente.value = false;
+          avisar(d && d.motivo ? d.motivo : "Encerramento da temporada recusado.", "erro");
+        });
+
         // ETAPA 6.3: ouvir "mina.cristal_produzido"
         // ETAPA 6.4: ouvir "construcao.iniciada", "construcao.concluida", "construcao.recusada"
         // ETAPA 6.5: ouvir lapidação e melhorias
@@ -380,17 +412,21 @@
 
       // ===== PEDIDOS (emit): o cliente PEDE algo ao servidor =====
       function abrirVila() {
-        // ETAPA 6.2: pedir "vila.abertura_solicitada"
+        if (!socket || !socket.connected || papel.value !== "mestre" || estado.fase !== "aguardando" || comandoTemporadaPendente.value) return;
+        comandoTemporadaPendente.value = true;
+        pedir("vila.abertura_solicitada");
       }
       function construir() {
         // ETAPA 6.4: pedir "construcao.solicitada"
       }
       function encerrarVila() {
-        // ETAPA 6.2: pedir "vila.encerramento_solicitado"
+        if (!socket || !socket.connected || papel.value !== "mestre" || estado.fase !== "aberta" || comandoTemporadaPendente.value) return;
+        comandoTemporadaPendente.value = true;
+        pedir("vila.encerramento_solicitado");
       }
 
       return { nome, papel, conectado, erroEntrada, estado, avisos, eventosVisiveis, contadores, ocultarProducao,
-               entrar, abrirVila, construir, encerrarVila };
+               comandoTemporadaPendente, entrar, abrirVila, construir, encerrarVila };
     }
   }).mount("#app");
 </script>

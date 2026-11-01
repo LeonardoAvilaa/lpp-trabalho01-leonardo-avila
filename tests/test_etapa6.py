@@ -310,6 +310,510 @@ class TestEtapa61Cliente(unittest.TestCase):
         self.assertIn("<!-- ETAPA 7 (dupla): cole aqui os contadores por evento -->", self.html_content)
         self.assertNotIn('v-for="(n, evNome) in contadores"', self.html_content)
 
+    # ── 4. Testes de Contrato da Etapa 6.2 (Abertura e Encerramento) ─────
+
+    def test_11_backend_abertura_e_encerramento_eventos_e_payloads(self):
+        """Verifica se o backend emite os eventos corretos com snapshot em abertura e encerramento."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        server.vila["fase"] = "aguardando"
+        server.mestre_sid = "m1"
+        server.jogadores["m1"] = {"nome": "Mestre", "papel": "mestre"}
+
+        with patch.object(server.sio, "emit", new_callable=AsyncMock) as mock_emit:
+            # Abertura
+            with patch.object(server, "INTERVALO_MINA", 100.0):
+                asyncio.run(server.abrir_vila("m1"))
+            self.assertEqual(server.vila["fase"], "aberta")
+            self.assertEqual(mock_emit.call_count, 1)
+            ev_aberta, payload_aberta = mock_emit.call_args.args[:2]
+            self.assertEqual(ev_aberta, "vila.aberta")
+            self.assertEqual(payload_aberta["causa"], "vila.abertura_solicitada")
+            self.assertEqual(payload_aberta["estado"]["fase"], "aberta")
+
+            # Encerramento
+            mock_emit.reset_mock()
+            asyncio.run(server.encerrar_vila("m1"))
+            self.assertEqual(server.vila["fase"], "encerrada")
+            self.assertEqual(mock_emit.call_count, 1)
+            ev_encerrada, payload_encerrada = mock_emit.call_args.args[:2]
+            self.assertEqual(ev_encerrada, "vila.encerrada")
+            self.assertEqual(payload_encerrada["causa"], "vila.encerramento_solicitado")
+            self.assertEqual(payload_encerrada["estado"]["fase"], "encerrada")
+
+    def test_12_backend_recusas_abertura_e_encerramento(self):
+        """Verifica se o backend emite as recusas corretas com motivo para solicitações inválidas."""
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        server.vila["fase"] = "aguardando"
+        server.mestre_sid = "m1"
+        server.jogadores["m1"] = {"nome": "Mestre", "papel": "mestre"}
+        server.jogadores["j1"] = {"nome": "Jogador", "papel": "jogador"}
+
+        with patch.object(server.sio, "emit", new_callable=AsyncMock) as mock_emit:
+            # Jogador tenta abrir
+            asyncio.run(server.abrir_vila("j1"))
+            self.assertEqual(mock_emit.call_count, 1)
+            ev, payload = mock_emit.call_args.args[:2]
+            self.assertEqual(ev, "vila.abertura_recusada")
+            self.assertIn("Apenas o Mestre", payload["motivo"])
+            self.assertEqual(server.vila["fase"], "aguardando")
+
+            # Mestre tenta encerrar em fase 'aguardando'
+            mock_emit.reset_mock()
+            asyncio.run(server.encerrar_vila("m1"))
+            self.assertEqual(mock_emit.call_count, 1)
+            ev, payload = mock_emit.call_args.args[:2]
+            self.assertEqual(ev, "vila.encerramento_recusado")
+            self.assertIn("fase 'aberta'", payload["motivo"])
+            self.assertEqual(server.vila["fase"], "aguardando")
+
+    def test_13_verificacao_contrato_pedidos_mestre_e_guardas_de_fase(self):
+        """Verificação isolada de lógica: emissão de pedidos do Mestre condicionada estritamente à fase."""
+        js_code = r"""
+        const pedidos = [];
+        let papel = "mestre";
+        let estado = { fase: "aguardando" };
+
+        function pedir(nome) {
+            pedidos.push(nome);
+        }
+
+        function abrirVila() {
+            if (papel !== "mestre" || estado.fase !== "aguardando") return;
+            pedir("vila.abertura_solicitada");
+        }
+
+        function encerrarVila() {
+            if (papel !== "mestre" || estado.fase !== "aberta") return;
+            pedir("vila.encerramento_solicitado");
+        }
+
+        const log = [];
+
+        // 1. Mestre na fase aguardando
+        abrirVila();
+        log.push({ fase: estado.fase, pedidos: [...pedidos] }); // deve emitir abertura
+
+        // 2. Tenta encerrar na fase aguardando (deve ser ignorado)
+        encerrarVila();
+        log.push({ fase: estado.fase, pedidos: [...pedidos] });
+
+        // 3. Fase passa para aberta (pelo servidor)
+        estado.fase = "aberta";
+        abrirVila(); // deve ser ignorado pois ja esta aberta
+        encerrarVila(); // deve emitir encerramento
+        log.push({ fase: estado.fase, pedidos: [...pedidos] });
+
+        // 4. Fase passa para encerrada
+        estado.fase = "encerrada";
+        abrirVila();
+        encerrarVila();
+        log.push({ fase: estado.fase, pedidos: [...pedidos] });
+
+        // 5. Papel jogador tenta emitir em qualquer fase
+        papel = "jogador";
+        estado.fase = "aguardando";
+        abrirVila();
+        estado.fase = "aberta";
+        encerrarVila();
+        log.push({ fase: estado.fase, pedidos: [...pedidos] });
+
+        console.log(JSON.stringify(log));
+        """
+        proc = subprocess.run(["node", "-e", js_code], capture_output=True, text=True, check=True)
+        res = json.loads(proc.stdout.strip())
+
+        # 1. Abertura emitida na fase aguardando
+        self.assertEqual(res[0]["pedidos"], ["vila.abertura_solicitada"])
+        # 2. Encerramento ignorado na fase aguardando
+        self.assertEqual(res[1]["pedidos"], ["vila.abertura_solicitada"])
+        # 3. Encerramento emitido na fase aberta; abertura ignorada
+        self.assertEqual(res[2]["pedidos"], ["vila.abertura_solicitada", "vila.encerramento_solicitado"])
+        # 4. Ambos ignorados na fase encerrada
+        self.assertEqual(res[3]["pedidos"], ["vila.abertura_solicitada", "vila.encerramento_solicitado"])
+        # 5. Jogador nunca emite
+        self.assertEqual(res[4]["pedidos"], ["vila.abertura_solicitada", "vila.encerramento_solicitado"])
+
+    def test_14_verificacao_contrato_listeners_abertura_e_encerramento(self):
+        """Verificação isolada de lógica: reação aos fatos de confirmação e recusa de abertura e encerramento."""
+        js_code = r"""
+        const estado = { fase: "aguardando" };
+        const avisos = [];
+
+        function avisar(texto, tipo) {
+            avisos.push({ texto, tipo });
+        }
+
+        function atualizar(d) {
+            if (d && d.estado && d.estado.fase) {
+                estado.fase = d.estado.fase;
+            }
+        }
+
+        // Simula ouvintes
+        function onVilaAberta(d) {
+            atualizar(d);
+            avisar("Temporada da vila aberta!", "ok");
+        }
+
+        function onVilaAberturaRecusada(d) {
+            avisar(d && d.motivo ? d.motivo : "Abertura da temporada recusada.", "erro");
+        }
+
+        function onVilaEncerrada(d) {
+            atualizar(d);
+            avisar("Temporada da vila encerrada!", "info");
+        }
+
+        function onVilaEncerramentoRecusado(d) {
+            avisar(d && d.motivo ? d.motivo : "Encerramento da temporada recusado.", "erro");
+        }
+
+        // Teste de recusa na abertura não altera fase
+        onVilaAberturaRecusada({ motivo: "Apenas o Mestre pode abrir a temporada." });
+        const fase1 = estado.fase;
+
+        // Teste de confirmação de abertura altera fase
+        onVilaAberta({ estado: { fase: "aberta" } });
+        const fase2 = estado.fase;
+
+        // Teste de recusa no encerramento não altera fase
+        onVilaEncerramentoRecusado({ motivo: "A vila só pode ser encerrada na fase 'aberta'." });
+        const fase3 = estado.fase;
+
+        // Teste de confirmação de encerramento altera fase
+        onVilaEncerrada({ estado: { fase: "encerrada" } });
+        const fase4 = estado.fase;
+
+        console.log(JSON.stringify({ fase1, fase2, fase3, fase4, avisos }));
+        """
+        proc = subprocess.run(["node", "-e", js_code], capture_output=True, text=True, check=True)
+        res = json.loads(proc.stdout.strip())
+
+        self.assertEqual(res["fase1"], "aguardando")
+        self.assertEqual(res["fase2"], "aberta")
+        self.assertEqual(res["fase3"], "aberta")
+        self.assertEqual(res["fase4"], "encerrada")
+
+        tipos_avisos = [a["tipo"] for a in res["avisos"]]
+        self.assertEqual(tipos_avisos, ["erro", "ok", "erro", "info"])
+
+    def test_15_verificacao_estatica_botoes_mestre_por_fase(self):
+        """Verificação estática de client/index.html para os controles condicionais da temporada."""
+        html_content = (RAIZ / "client" / "index.html").read_text(encoding="utf-8")
+
+        # Botões de abertura e encerramento devem ser exclusivos do mestre, condicionados à fase e com binding :disabled
+        self.assertIn("button v-if=\"estado.fase === 'aguardando'\" :disabled=\"comandoTemporadaPendente\" @click=\"abrirVila\"", html_content)
+        self.assertIn("button v-else-if=\"estado.fase === 'aberta'\" :disabled=\"comandoTemporadaPendente\" @click=\"encerrarVila\"", html_content)
+
+        # Estado reativo e exportação em setup()
+        self.assertIn("const comandoTemporadaPendente = ref(false);", html_content)
+        self.assertIn("comandoTemporadaPendente,", html_content)
+
+        # Escutas registradas no script
+        self.assertIn('socket.on("disconnect"', html_content)
+        self.assertIn('ouvir("estado.sincronizado"', html_content)
+        self.assertIn('ouvir("vila.aberta"', html_content)
+        self.assertIn('ouvir("vila.abertura_recusada"', html_content)
+        self.assertIn('ouvir("vila.encerrada"', html_content)
+        self.assertIn('ouvir("vila.encerramento_recusado"', html_content)
+
+        # Pedidos registrados nas funções e guardas de conexão
+        self.assertIn('!socket || !socket.connected', html_content)
+        self.assertIn('pedir("vila.abertura_solicitada")', html_content)
+        self.assertIn('pedir("vila.encerramento_solicitado")', html_content)
+
+    def test_16_verificacao_contrato_bloqueio_duplo_clique_e_liberacao_pendencia(self):
+        """Verificação isolada de lógica: proteção contra cliques múltiplos e liberação de pendência por confirmação ou recusa."""
+        js_code = r"""
+        const pedidos = [];
+        let papel = "mestre";
+        let estado = { fase: "aguardando" };
+        let comandoTemporadaPendente = false;
+
+        function pedir(nome) {
+            pedidos.push(nome);
+        }
+
+        function atualizar(d) {
+            if (d && d.estado && d.estado.fase) {
+                estado.fase = d.estado.fase;
+            }
+        }
+
+        function abrirVila() {
+            if (papel !== "mestre" || estado.fase !== "aguardando" || comandoTemporadaPendente) return;
+            comandoTemporadaPendente = true;
+            pedir("vila.abertura_solicitada");
+        }
+
+        function encerrarVila() {
+            if (papel !== "mestre" || estado.fase !== "aberta" || comandoTemporadaPendente) return;
+            comandoTemporadaPendente = true;
+            pedir("vila.encerramento_solicitado");
+        }
+
+        // Simula ouvintes liberando o estado pendente
+        function onVilaAberta(d) {
+            comandoTemporadaPendente = false;
+            atualizar(d);
+        }
+
+        function onVilaAberturaRecusada(d) {
+            comandoTemporadaPendente = false;
+        }
+
+        function onVilaEncerrada(d) {
+            comandoTemporadaPendente = false;
+            atualizar(d);
+        }
+
+        function onVilaEncerramentoRecusado(d) {
+            comandoTemporadaPendente = false;
+        }
+
+        const log = {};
+
+        // 1. Dois cliques consecutivos de abertura: o segundo deve ser bloqueado
+        abrirVila();
+        const pedidosAposPrimeiroClique = pedidos.length;
+        const pendenteAposPrimeiroClique = comandoTemporadaPendente;
+        abrirVila(); // segundo clique consecutivo
+        const pedidosAposSegundoClique = pedidos.length;
+
+        log.aberturaDuploClique = {
+            pedidosAposPrimeiroClique,
+            pendenteAposPrimeiroClique,
+            pedidosAposSegundoClique
+        };
+
+        // 2. Recusa de abertura libera a possibilidade de tentar novamente sem alterar a fase
+        onVilaAberturaRecusada({ motivo: "Servidor ocupado" });
+        const pendenteAposRecusaAbertura = comandoTemporadaPendente;
+        const faseAposRecusaAbertura = estado.fase;
+        abrirVila(); // nova tentativa permitida após recusa
+        const pedidosAposTentativaAposRecusa = pedidos.length;
+
+        log.aberturaRecusaELiberacao = {
+            pendenteAposRecusaAbertura,
+            faseAposRecusaAbertura,
+            pedidosAposTentativaAposRecusa
+        };
+
+        // 3. Confirmação de abertura libera pendência e atualiza a fase como autoridade
+        onVilaAberta({ estado: { fase: "aberta" } });
+        const pendenteAposConfirmacaoAbertura = comandoTemporadaPendente;
+        const faseAposConfirmacaoAbertura = estado.fase;
+
+        log.aberturaConfirmacao = {
+            pendenteAposConfirmacaoAbertura,
+            faseAposConfirmacaoAbertura
+        };
+
+        // 4. Dois cliques consecutivos de encerramento na fase aberta: o segundo deve ser bloqueado
+        encerrarVila();
+        const pedidosAposPrimeiroEncerramento = pedidos.length;
+        const pendenteAposPrimeiroEncerramento = comandoTemporadaPendente;
+        encerrarVila(); // segundo clique consecutivo
+        const pedidosAposSegundoEncerramento = pedidos.length;
+
+        log.encerramentoDuploClique = {
+            pedidosAposPrimeiroEncerramento,
+            pendenteAposPrimeiroEncerramento,
+            pedidosAposSegundoEncerramento
+        };
+
+        // 5. Recusa de encerramento libera possibilidade de tentar novamente mantendo fase aberta
+        onVilaEncerramentoRecusado({ motivo: "Servidor recusou encerramento" });
+        const pendenteAposRecusaEncerramento = comandoTemporadaPendente;
+        const faseAposRecusaEncerramento = estado.fase;
+        encerrarVila(); // nova tentativa permitida após recusa
+        const pedidosAposTentativaAposRecusaEncerramento = pedidos.length;
+
+        log.encerramentoRecusaELiberacao = {
+            pendenteAposRecusaEncerramento,
+            faseAposRecusaEncerramento,
+            pedidosAposTentativaAposRecusaEncerramento
+        };
+
+        // 6. Confirmação de encerramento libera pendência e atualiza fase para autoridade do servidor
+        onVilaEncerrada({ estado: { fase: "encerrada" } });
+        const pendenteAposConfirmacaoEncerramento = comandoTemporadaPendente;
+        const faseAposConfirmacaoEncerramento = estado.fase;
+
+        // Com temporada encerrada, cliques adicionais não emitem pedidos
+        abrirVila();
+        encerrarVila();
+        const pedidosFinais = pedidos.length;
+
+        log.encerramentoConfirmacao = {
+            pendenteAposConfirmacaoEncerramento,
+            faseAposConfirmacaoEncerramento,
+            pedidosFinais
+        };
+
+        console.log(JSON.stringify(log));
+        """
+        proc = subprocess.run(["node", "-e", js_code], capture_output=True, text=True, check=True)
+        res = json.loads(proc.stdout.strip())
+
+        # 1. Dois cliques consecutivos de abertura geram apenas 1 pedido
+        self.assertEqual(res["aberturaDuploClique"]["pedidosAposPrimeiroClique"], 1)
+        self.assertTrue(res["aberturaDuploClique"]["pendenteAposPrimeiroClique"])
+        self.assertEqual(res["aberturaDuploClique"]["pedidosAposSegundoClique"], 1)
+
+        # 2. Recusa libera pendência e permite nova tentativa
+        self.assertFalse(res["aberturaRecusaELiberacao"]["pendenteAposRecusaAbertura"])
+        self.assertEqual(res["aberturaRecusaELiberacao"]["faseAposRecusaAbertura"], "aguardando")
+        self.assertEqual(res["aberturaRecusaELiberacao"]["pedidosAposTentativaAposRecusa"], 2)
+
+        # 3. Confirmação libera pendência e autoridade da fase é do servidor
+        self.assertFalse(res["aberturaConfirmacao"]["pendenteAposConfirmacaoAbertura"])
+        self.assertEqual(res["aberturaConfirmacao"]["faseAposConfirmacaoAbertura"], "aberta")
+
+        # 4. Dois cliques consecutivos de encerramento geram apenas 1 pedido
+        self.assertEqual(res["encerramentoDuploClique"]["pedidosAposPrimeiroEncerramento"], 3)
+        self.assertTrue(res["encerramentoDuploClique"]["pendenteAposPrimeiroEncerramento"])
+        self.assertEqual(res["encerramentoDuploClique"]["pedidosAposSegundoEncerramento"], 3)
+
+        # 5. Recusa de encerramento libera pendência e permite nova tentativa
+        self.assertFalse(res["encerramentoRecusaELiberacao"]["pendenteAposRecusaEncerramento"])
+        self.assertEqual(res["encerramentoRecusaELiberacao"]["faseAposRecusaEncerramento"], "aberta")
+        self.assertEqual(res["encerramentoRecusaELiberacao"]["pedidosAposTentativaAposRecusaEncerramento"], 4)
+
+        # 6. Confirmação de encerramento libera pendência e atualiza fase final
+        self.assertFalse(res["encerramentoConfirmacao"]["pendenteAposConfirmacaoEncerramento"])
+        self.assertEqual(res["encerramentoConfirmacao"]["faseAposConfirmacaoEncerramento"], "encerrada")
+        self.assertEqual(res["encerramentoConfirmacao"]["pedidosFinais"], 4)
+
+    def test_17_verificacao_contrato_desconexao_reconexao_e_guarda_socket(self):
+        """Verificação isolada de lógica: desconexão, sincronização e proteção contra envio de comandos sem conexão."""
+        js_code = r"""
+        let socket = null;
+        let conectado = true;
+        let comandoTemporadaPendente = true;
+        let papel = "mestre";
+        let estado = { fase: "aguardando", brutos: 5 };
+        const pedidos = [];
+
+        function pedir(nome) {
+            pedidos.push(nome);
+        }
+
+        function atualizar(d) {
+            if (d && d.estado) {
+                if (d.estado.fase !== undefined) estado.fase = d.estado.fase;
+                if (d.estado.brutos !== undefined) estado.brutos = d.estado.brutos;
+            }
+        }
+
+        function onDisconnect() {
+            conectado = false;
+            comandoTemporadaPendente = false;
+        }
+
+        function onEstadoSincronizado(d) {
+            comandoTemporadaPendente = false;
+            atualizar(d);
+        }
+
+        function abrirVila() {
+            if (!socket || !socket.connected || papel !== "mestre" || estado.fase !== "aguardando" || comandoTemporadaPendente) return;
+            comandoTemporadaPendente = true;
+            pedir("vila.abertura_solicitada");
+        }
+
+        function encerrarVila() {
+            if (!socket || !socket.connected || papel !== "mestre" || estado.fase !== "aberta" || comandoTemporadaPendente) return;
+            comandoTemporadaPendente = true;
+            pedir("vila.encerramento_solicitado");
+        }
+
+        const log = {};
+
+        // 1. Tratamento de disconnect: atualiza conectado e libera pendência sem alterar a fase
+        onDisconnect();
+        log.desconexao = {
+            conectado,
+            comandoTemporadaPendente,
+            fase: estado.fase,
+            brutos: estado.brutos
+        };
+
+        // 2. Proteção contra comandos sem socket ou com socket desconectado
+        // 2a. socket === null em abrirVila()
+        abrirVila();
+        // 2b. socket com connected = false em abrirVila()
+        socket = { connected: false };
+        abrirVila();
+        log.abrirSemConexao = {
+            pedidos: [...pedidos],
+            comandoTemporadaPendente
+        };
+
+        // 2c. socket === null em encerrarVila() (simula fase aberta)
+        estado.fase = "aberta";
+        socket = null;
+        encerrarVila();
+        // 2d. socket com connected = false em encerrarVila()
+        socket = { connected: false };
+        encerrarVila();
+        log.encerrarSemConexao = {
+            pedidos: [...pedidos],
+            comandoTemporadaPendente
+        };
+
+        // 3. Reconexão e evento estado.sincronizado: restaura dados e libera pendência
+        comandoTemporadaPendente = true; // simula pendência ativada anteriormente
+        onEstadoSincronizado({
+            causa: "conexao",
+            estado: { fase: "aberta", brutos: 15 }
+        });
+        log.sincronizacao = {
+            comandoTemporadaPendente,
+            fase: estado.fase,
+            brutos: estado.brutos
+        };
+
+        // 4. Com socket conectado, comando é emitido normalmente
+        socket = { connected: true };
+        encerrarVila();
+        log.encerrarConectado = {
+            pedidos: [...pedidos],
+            comandoTemporadaPendente
+        };
+
+        console.log(JSON.stringify(log));
+        """
+        proc = subprocess.run(["node", "-e", js_code], capture_output=True, text=True, check=True)
+        res = json.loads(proc.stdout.strip())
+
+        # 1. Disconnect atualiza conexão e libera pendência sem alterar fase ou dados existentes
+        self.assertFalse(res["desconexao"]["conectado"])
+        self.assertFalse(res["desconexao"]["comandoTemporadaPendente"])
+        self.assertEqual(res["desconexao"]["fase"], "aguardando")
+        self.assertEqual(res["desconexao"]["brutos"], 5)
+
+        # 2. abrirVila() sem conexão não emite comando e não ativa pendência
+        self.assertEqual(res["abrirSemConexao"]["pedidos"], [])
+        self.assertFalse(res["abrirSemConexao"]["comandoTemporadaPendente"])
+
+        # 3. encerrarVila() sem conexão não emite comando e não ativa pendência
+        self.assertEqual(res["encerrarSemConexao"]["pedidos"], [])
+        self.assertFalse(res["encerrarSemConexao"]["comandoTemporadaPendente"])
+
+        # 4. estado.sincronizado libera pendência e atualiza snapshot autoritativo
+        self.assertFalse(res["sincronizacao"]["comandoTemporadaPendente"])
+        self.assertEqual(res["sincronizacao"]["fase"], "aberta")
+        self.assertEqual(res["sincronizacao"]["brutos"], 15)
+
+        # 5. Com socket conectado, pedido é emitido e pendência ativada
+        self.assertEqual(res["encerrarConectado"]["pedidos"], ["vila.encerramento_solicitado"])
+        self.assertTrue(res["encerrarConectado"]["comandoTemporadaPendente"])
+
 
 if __name__ == "__main__":
     unittest.main()
