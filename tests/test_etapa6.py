@@ -931,6 +931,344 @@ class TestEtapa61Cliente(unittest.TestCase):
         # Quando marcado (true), mina.cristal_produzido é ocultado, outros eventos permanecem
         self.assertEqual(res["oculto"], ["vila.aberta", "vila.encerrada"])
 
+    # ── 5. Construção de Lapidárias (Etapa 6.4) ────────────────────────────
+
+    def test_21_verificacao_estatica_elementos_construcao(self):
+        """Verificação estática de client/index.html para os elementos e bindings da construção de lapidárias."""
+        html_content = (RAIZ / "client" / "index.html").read_text(encoding="utf-8")
+
+        # Botão de construção com diretiva :disabled e handler @click
+        self.assertIn(':disabled="comandoConstrucaoPendente" @click="construir">🔨 Construir</button>', html_content)
+
+        # Definição e exportação do estado reativo
+        self.assertIn("const comandoConstrucaoPendente = ref(false);", html_content)
+        self.assertIn("comandoConstrucaoPendente,", html_content)
+
+        # Função construir com guardas de conexão, papel, fase e pendência
+        self.assertIn("function construir()", html_content)
+        self.assertIn('papel.value !== "jogador"', html_content)
+        self.assertIn('estado.fase !== "aberta"', html_content)
+        self.assertIn('pedir("construcao.solicitada")', html_content)
+
+        # Três listeners de construção registrados
+        self.assertIn('ouvir("construcao.iniciada"', html_content)
+        self.assertIn('ouvir("construcao.concluida"', html_content)
+        self.assertIn('ouvir("construcao.recusada"', html_content)
+
+        # Checagem do solicitante ao liberar trava na construção iniciada
+        self.assertIn('d.solicitante === nome.value', html_content)
+
+    def test_22_verificacao_contrato_funcao_construir_guardas_e_bloqueio_duplicado(self):
+        """Verificação isolada de lógica: guardas da função construir(), envio sem payload e trava contra cliques duplicados."""
+        js_code = r"""
+        const pedidos = [];
+        let socket = null;
+        let papel = "jogador";
+        let fase = "aberta";
+        let comandoConstrucaoPendente = false;
+
+        function pedir(nome, dados) {
+            pedidos.push({ nome, dados: dados === undefined ? null : dados });
+        }
+
+        function construir() {
+            if (!socket || !socket.connected || papel !== "jogador" || fase !== "aberta" || comandoConstrucaoPendente) return;
+            comandoConstrucaoPendente = true;
+            pedir("construcao.solicitada");
+        }
+
+        const log = {};
+
+        // 1. Socket nulo -> não emite
+        construir();
+        log.socketNulo = { pedidos: pedidos.length, pendente: comandoConstrucaoPendente };
+
+        // 2. Socket desconectado -> não emite
+        socket = { connected: false };
+        construir();
+        log.socketDesconectado = { pedidos: pedidos.length, pendente: comandoConstrucaoPendente };
+
+        // 3. Papel diferente de jogador (ex: mestre) -> não emite
+        socket = { connected: true };
+        papel = "mestre";
+        construir();
+        log.papelInvalido = { pedidos: pedidos.length, pendente: comandoConstrucaoPendente };
+
+        // 4. Fase diferente de aberta (ex: aguardando) -> não emite
+        papel = "jogador";
+        fase = "aguardando";
+        construir();
+        log.faseAguardando = { pedidos: pedidos.length, pendente: comandoConstrucaoPendente };
+
+        // 5. Condições válidas -> emite pedido sem payload obrigatório e ativa pendência
+        fase = "aberta";
+        construir();
+        log.construirValido = {
+            pedidos: [...pedidos],
+            pendente: comandoConstrucaoPendente
+        };
+
+        // 6. Segundo clique consecutivo com pendência ativa -> bloqueado
+        construir();
+        log.duploClique = {
+            pedidos: [...pedidos],
+            pendente: comandoConstrucaoPendente
+        };
+
+        console.log(JSON.stringify(log));
+        """
+        proc = subprocess.run(["node", "-e", js_code], capture_output=True, text=True, check=True)
+        res = json.loads(proc.stdout.strip())
+
+        # Guardas prévias não disparam pedido
+        self.assertEqual(res["socketNulo"]["pedidos"], 0)
+        self.assertFalse(res["socketNulo"]["pendente"])
+
+        self.assertEqual(res["socketDesconectado"]["pedidos"], 0)
+        self.assertFalse(res["socketDesconectado"]["pendente"])
+
+        self.assertEqual(res["papelInvalido"]["pedidos"], 0)
+        self.assertFalse(res["papelInvalido"]["pendente"])
+
+        self.assertEqual(res["faseAguardando"]["pedidos"], 0)
+        self.assertFalse(res["faseAguardando"]["pendente"])
+
+        # Chamada válida emite sem payload adicional e ativa pendência
+        self.assertEqual(len(res["construirValido"]["pedidos"]), 1)
+        self.assertEqual(res["construirValido"]["pedidos"][0]["nome"], "construcao.solicitada")
+        self.assertIsNone(res["construirValido"]["pedidos"][0]["dados"])
+        self.assertTrue(res["construirValido"]["pendente"])
+
+        # Segundo clique consecutivo é bloqueado
+        self.assertEqual(len(res["duploClique"]["pedidos"]), 1)
+        self.assertTrue(res["duploClique"]["pendente"])
+
+    def test_23_verificacao_contrato_listeners_construcao_e_concorrencia_solicitante(self):
+        """Verificação isolada de lógica: listeners de construção, proteção contra liberação indevida por outros jogadores e atualização de snapshot."""
+        js_code = r"""
+        const nomeUsuario = "Alice";
+        let comandoConstrucaoPendente = true; // simula que Alice clicou em construir
+        const estado = {
+            brutos: 10,
+            trabalhadores: { ocupados: 0, limite: 2 },
+            lotes: { lote1: null, lote2: null, lote3: null, lote4: null, lote5: null, lote6: null },
+            lapidarias: {},
+            construcoes: []
+        };
+        const avisos = [];
+
+        function avisar(texto, tipo) {
+            avisos.push({ texto, tipo });
+        }
+
+        function atualizar(d) {
+            if (!d || !d.estado) return;
+            const e = d.estado;
+            if (e.brutos !== undefined) estado.brutos = e.brutos;
+            if (e.trabalhadores) {
+                if (e.trabalhadores.ocupados !== undefined) estado.trabalhadores.ocupados = e.trabalhadores.ocupados;
+                if (e.trabalhadores.limite !== undefined) estado.trabalhadores.limite = e.trabalhadores.limite;
+            }
+            if (e.lapidarias !== undefined) estado.lapidarias = e.lapidarias;
+            if (e.lotes !== undefined) estado.lotes = e.lotes;
+            if (e.construcoes !== undefined) estado.construcoes = e.construcoes;
+        }
+
+        function onConstrucaoIniciada(d) {
+            if (d && d.solicitante === nomeUsuario) {
+                comandoConstrucaoPendente = false;
+            }
+            atualizar(d);
+            const lapId = (d && d.lapidaria_id) || "lapidária";
+            const lote = (d && d.lote) || "";
+            avisar(`Construção da ${lapId} iniciada no ${lote}!`, "info");
+        }
+
+        function onConstrucaoConcluida(d) {
+            atualizar(d);
+            const lapId = (d && d.lapidaria_id) || "lapidária";
+            const lote = (d && d.lote) || "";
+            avisar(`Lapidária ${lapId} concluída no ${lote}!`, "ok");
+        }
+
+        function onConstrucaoRecusada(d) {
+            comandoConstrucaoPendente = false;
+            atualizar(d);
+            avisar(d && d.motivo ? d.motivo : "Construção recusada.", "erro");
+        }
+
+        const log = {};
+
+        // 1. Outro jogador (Bob) inicia construção:
+        // Atualiza estado, MAS a trava de Alice continua ativa (true)
+        onConstrucaoIniciada({
+            solicitante: "Bob",
+            lapidaria_id: "lapidaria-1",
+            lote: "lote1",
+            custo: 5,
+            estado: {
+                brutos: 5,
+                trabalhadores: { ocupados: 1, limite: 2 },
+                lotes: { lote1: "lapidaria-1", lote2: null, lote3: null, lote4: null, lote5: null, lote6: null },
+                lapidarias: { "lapidaria-1": { id: "lapidaria-1", lote: "lote1", nivel: 1, situacao: "em construção" } },
+                construcoes: [{ lid: "lapidaria-1", tempo_restante: 3.0 }]
+            }
+        });
+        log.construcaoOutroJogador = {
+            pendenteAlice: comandoConstrucaoPendente,
+            brutos: estado.brutos,
+            trabalhadores: estado.trabalhadores.ocupados,
+            lote1: estado.lotes.lote1
+        };
+
+        // 2. A própria Alice recebe a confirmação de sua construção:
+        // A trava de Alice é liberada (false) e snapshot atualizado
+        onConstrucaoIniciada({
+            solicitante: "Alice",
+            lapidaria_id: "lapidaria-2",
+            lote: "lote2",
+            custo: 5,
+            estado: {
+                brutos: 0,
+                trabalhadores: { ocupados: 2, limite: 2 },
+                lotes: { lote1: "lapidaria-1", lote2: "lapidaria-2", lote3: null, lote4: null, lote5: null, lote6: null },
+                lapidarias: {
+                    "lapidaria-1": { id: "lapidaria-1", lote: "lote1", nivel: 1, situacao: "em construção" },
+                    "lapidaria-2": { id: "lapidaria-2", lote: "lote2", nivel: 1, situacao: "em construção" }
+                },
+                construcoes: [
+                    { lid: "lapidaria-1", tempo_restante: 1.5 },
+                    { lid: "lapidaria-2", tempo_restante: 3.0 }
+                ]
+            }
+        });
+        log.construcaoProprioJogador = {
+            pendenteAlice: comandoConstrucaoPendente,
+            brutos: estado.brutos,
+            trabalhadores: estado.trabalhadores.ocupados,
+            lote2: estado.lotes.lote2
+        };
+
+        // 3. Conclusão da construção:
+        // Atualiza snapshot (trabalhador liberado, situação disponível)
+        onConstrucaoConcluida({
+            lapidaria_id: "lapidaria-1",
+            lote: "lote1",
+            nivel: 1,
+            situacao: "disponível",
+            estado: {
+                brutos: 0,
+                trabalhadores: { ocupados: 1, limite: 2 },
+                lotes: { lote1: "lapidaria-1", lote2: "lapidaria-2", lote3: null, lote4: null, lote5: null, lote6: null },
+                lapidarias: {
+                    "lapidaria-1": { id: "lapidaria-1", lote: "lote1", nivel: 1, situacao: "disponível" },
+                    "lapidaria-2": { id: "lapidaria-2", lote: "lote2", nivel: 1, situacao: "em construção" }
+                },
+                construcoes: [{ lid: "lapidaria-2", tempo_restante: 1.5 }]
+            }
+        });
+        log.conclusao = {
+            trabalhadores: estado.trabalhadores.ocupados,
+            situacaoLap1: estado.lapidarias["lapidaria-1"].situacao,
+            construcoesAtivas: estado.construcoes.length
+        };
+
+        // 4. Recusa de construção:
+        // Libera pendência, aplica snapshot e emite aviso de erro
+        comandoConstrucaoPendente = true; // simula novo clique
+        onConstrucaoRecusada({
+            motivo: "Cristais brutos insuficientes (necessário: 5).",
+            causa: "construcao.solicitada",
+            estado: {
+                brutos: 0,
+                trabalhadores: { ocupados: 1, limite: 2 }
+            }
+        });
+        log.recusa = {
+            pendente: comandoConstrucaoPendente,
+            ultimoAviso: avisos[avisos.length - 1]
+        };
+
+        console.log(JSON.stringify(log));
+        """
+        proc = subprocess.run(["node", "-e", js_code], capture_output=True, text=True, check=True)
+        res = json.loads(proc.stdout.strip())
+
+        # 1. Construção de outro jogador atualiza snapshot mas NÃO libera a trava local
+        self.assertTrue(res["construcaoOutroJogador"]["pendenteAlice"])
+        self.assertEqual(res["construcaoOutroJogador"]["brutos"], 5)
+        self.assertEqual(res["construcaoOutroJogador"]["trabalhadores"], 1)
+        self.assertEqual(res["construcaoOutroJogador"]["lote1"], "lapidaria-1")
+
+        # 2. Construção do próprio jogador libera a trava e atualiza snapshot
+        self.assertFalse(res["construcaoProprioJogador"]["pendenteAlice"])
+        self.assertEqual(res["construcaoProprioJogador"]["brutos"], 0)
+        self.assertEqual(res["construcaoProprioJogador"]["trabalhadores"], 2)
+        self.assertEqual(res["construcaoProprioJogador"]["lote2"], "lapidaria-2")
+
+        # 3. Conclusão atualiza trabalhador para 1 e lapidária para disponível
+        self.assertEqual(res["conclusao"]["trabalhadores"], 1)
+        self.assertEqual(res["conclusao"]["situacaoLap1"], "disponível")
+        self.assertEqual(res["conclusao"]["construcoesAtivas"], 1)
+
+        # 4. Recusa libera pendência e exibe mensagem de erro
+        self.assertFalse(res["recusa"]["pendente"])
+        self.assertEqual(res["recusa"]["ultimoAviso"]["tipo"], "erro")
+        self.assertIn("insuficientes", res["recusa"]["ultimoAviso"]["texto"])
+
+    def test_24_verificacao_contrato_liberacao_trava_construcao_por_conexao(self):
+        """Verificação isolada de lógica: liberação de comandoConstrucaoPendente em disconnect, connect_error e estado.sincronizado."""
+        js_code = r"""
+        let conectado = true;
+        let comandoConstrucaoPendente = true;
+        let erroEntrada = "";
+
+        function onConnectError(err) {
+            conectado = false;
+            comandoConstrucaoPendente = false;
+            erroEntrada = (err && err.message) ? err.message : "Conexão recusada";
+        }
+
+        function onDisconnect() {
+            conectado = false;
+            comandoConstrucaoPendente = false;
+        }
+
+        function onEstadoSincronizado() {
+            comandoConstrucaoPendente = false;
+        }
+
+        const log = {};
+
+        // 1. connect_error libera pendência
+        comandoConstrucaoPendente = true;
+        onConnectError({ message: "Servidor indisponível" });
+        log.aposConnectError = { conectado, pendente: comandoConstrucaoPendente };
+
+        // 2. disconnect libera pendência
+        comandoConstrucaoPendente = true;
+        conectado = true;
+        onDisconnect();
+        log.aposDisconnect = { conectado, pendente: comandoConstrucaoPendente };
+
+        // 3. estado.sincronizado libera pendência
+        comandoConstrucaoPendente = true;
+        onEstadoSincronizado();
+        log.aposSincronizacao = { pendente: comandoConstrucaoPendente };
+
+        console.log(JSON.stringify(log));
+        """
+        proc = subprocess.run(["node", "-e", js_code], capture_output=True, text=True, check=True)
+        res = json.loads(proc.stdout.strip())
+
+        self.assertFalse(res["aposConnectError"]["pendente"])
+        self.assertFalse(res["aposConnectError"]["conectado"])
+
+        self.assertFalse(res["aposDisconnect"]["pendente"])
+        self.assertFalse(res["aposDisconnect"]["conectado"])
+
+        self.assertFalse(res["aposSincronizacao"]["pendente"])
+
 
 if __name__ == "__main__":
     unittest.main()

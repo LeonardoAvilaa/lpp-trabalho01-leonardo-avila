@@ -73,7 +73,7 @@
         <button v-if="estado.fase === 'aguardando'" :disabled="comandoTemporadaPendente" @click="abrirVila">Abrir temporada</button>
         <button v-else-if="estado.fase === 'aberta'" :disabled="comandoTemporadaPendente" @click="encerrarVila">Encerrar temporada</button>
       </template>
-      <button v-else @click="construir">🔨 Construir</button>
+      <button v-else :disabled="comandoConstrucaoPendente" @click="construir">🔨 Construir</button>
     </section>
 
     <ul class="avisos">
@@ -272,6 +272,7 @@
       const eventosVisiveis = computed(() =>
         eventos.value.filter((e) => !(ocultarProducao.value && (e.nome === "mina.cristal_produzido" || e.nome === "recurso.produzido"))));
       const comandoTemporadaPendente = ref(false);
+      const comandoConstrucaoPendente = ref(false);
       const jogo = criarJogo();      // a vila desenhada (Phaser)
       let socket = null;
 
@@ -338,6 +339,7 @@
       function entrar(p) {
         erroEntrada.value = "";
         comandoTemporadaPendente.value = false;
+        comandoConstrucaoPendente.value = false;
         const nomeLimpo = (nome.value || "").trim();
         if (!nomeLimpo) {
           erroEntrada.value = "Informe um nome válido para entrar.";
@@ -357,6 +359,7 @@
         socket.on("connect_error", (err) => {
           conectado.value = false;
           comandoTemporadaPendente.value = false;
+          comandoConstrucaoPendente.value = false;
           erroEntrada.value = (err && err.message) ? err.message : "Conexão recusada pelo servidor.";
           if (socket) {
             socket.disconnect();
@@ -367,6 +370,7 @@
         socket.on("disconnect", () => {
           conectado.value = false;
           comandoTemporadaPendente.value = false;
+          comandoConstrucaoPendente.value = false;
         });
 
         socket.on("connect", () => {
@@ -379,6 +383,7 @@
         // ETAPA 6.1: ouvir "estado.sincronizado" para sincronização do snapshot
         ouvir("estado.sincronizado", "Sincroniza estado inicial da vila", (d) => {
           comandoTemporadaPendente.value = false;
+          comandoConstrucaoPendente.value = false;
           atualizar(d);
         });
 
@@ -410,6 +415,29 @@
           atualizar(d);
         });
         // ETAPA 6.4: ouvir "construcao.iniciada", "construcao.concluida", "construcao.recusada"
+        ouvir("construcao.iniciada", "Inicia obra no lote", (d) => {
+          if (d && d.solicitante === nome.value) {
+            comandoConstrucaoPendente.value = false;
+          }
+          atualizar(d);
+          const lapId = (d && d.lapidaria_id) || "lapidária";
+          const lote = (d && d.lote) || "";
+          avisar(`Construção da ${lapId} iniciada no ${lote}!`, "info");
+        });
+
+        ouvir("construcao.concluida", "Conclui obra da lapidária", (d) => {
+          atualizar(d);
+          const lapId = (d && d.lapidaria_id) || "lapidária";
+          const lote = (d && d.lote) || "";
+          avisar(`Lapidária ${lapId} concluída no ${lote}!`, "ok");
+        });
+
+        ouvir("construcao.recusada", "Informa recusa na construção", (d) => {
+          comandoConstrucaoPendente.value = false;
+          atualizar(d);
+          avisar(d && d.motivo ? d.motivo : "Construção recusada.", "erro");
+        });
+
         // ETAPA 6.5: ouvir lapidação e melhorias
       }
 
@@ -420,7 +448,9 @@
         pedir("vila.abertura_solicitada");
       }
       function construir() {
-        // ETAPA 6.4: pedir "construcao.solicitada"
+        if (!socket || !socket.connected || papel.value !== "jogador" || estado.fase !== "aberta" || comandoConstrucaoPendente.value) return;
+        comandoConstrucaoPendente.value = true;
+        pedir("construcao.solicitada");
       }
       function encerrarVila() {
         if (!socket || !socket.connected || papel.value !== "mestre" || estado.fase !== "aberta" || comandoTemporadaPendente.value) return;
@@ -429,7 +459,7 @@
       }
 
       return { nome, papel, conectado, erroEntrada, estado, avisos, eventosVisiveis, contadores, ocultarProducao,
-               comandoTemporadaPendente, entrar, abrirVila, construir, encerrarVila };
+               comandoTemporadaPendente, comandoConstrucaoPendente, entrar, abrirVila, construir, encerrarVila };
     }
   }).mount("#app");
 </script>
