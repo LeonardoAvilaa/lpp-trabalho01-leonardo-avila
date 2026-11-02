@@ -135,6 +135,11 @@
         <span class="badge on">⬇ on</span> este cliente ESCUTOU um evento e reagiu
       </p>
       <!-- ETAPA 7 (dupla): cole aqui os contadores por evento -->
+      <div class="contadores">
+        <span v-for="(n, nome) in contadores" :key="nome" class="chip">
+          {{ nome }} ×{{ n }}
+        </span>
+      </div>
       <label><input type="checkbox" v-model="ocultarProducao"> ocultar mina.cristal_produzido</label>
       <ul>
         <li v-for="e in eventosVisiveis" :class="e.tipo">
