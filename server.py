@@ -341,49 +341,64 @@ async def obra_construcao(lid, token_obra, inicio_monotonic, inicio_emitido):
 async def solicitar_melhoria(sid, dados=None):
     pedido = "melhoria.solicitada"
 
+    # Extrair identificador da solicitação e da lapidária
+    if isinstance(dados, dict):
+        lid = dados.get("lapidaria_id")
+        raw_id = dados.get("solicitacao_id")
+    elif isinstance(dados, str):
+        lid = dados
+        raw_id = None
+    else:
+        lid = None
+        raw_id = None
+
+    if isinstance(raw_id, str):
+        solicitacao_id = raw_id.strip()
+        if not solicitacao_id or len(solicitacao_id) > 128:
+            solicitacao_id = None
+    else:
+        solicitacao_id = None
+
     # 1. Validar solicitante: apenas jogadores conectados
     jogador = jogadores.get(sid)
     if not jogador or jogador.get("papel") != "jogador":
-        await sio.emit("melhoria.recusada", fato(pedido, motivo="Apenas jogadores podem solicitar melhorias."), to=sid)
+        await sio.emit("melhoria.recusada", fato(pedido, motivo="Apenas jogadores podem solicitar melhorias.", solicitacao_id=solicitacao_id), to=sid)
         return
 
     # 2. Validar fase da vila
     if vila["fase"] != "aberta":
-        await sio.emit("melhoria.recusada", fato(pedido, motivo="Melhorias só são permitidas com a vila aberta."), to=sid)
+        await sio.emit("melhoria.recusada", fato(pedido, motivo="Melhorias só são permitidas com a vila aberta.", solicitacao_id=solicitacao_id), to=sid)
         return
 
-    # Extrair identificador da lapidária
-    if isinstance(dados, dict):
-        lid = dados.get("lapidaria_id")
-    elif isinstance(dados, str):
-        lid = dados
-    else:
-        lid = None
+    # 3. Validar identificador de solicitação (correlação obrigatória)
+    if not solicitacao_id:
+        await sio.emit("melhoria.recusada", fato(pedido, motivo="Identificador da solicitação ausente ou inválido.", solicitacao_id=solicitacao_id), to=sid)
+        return
 
-    # 3. Validar existência da lapidária
+    # 4. Validar existência da lapidária
     if not lid or lid not in vila["lapidarias"]:
-        await sio.emit("melhoria.recusada", fato(pedido, motivo="Lapidária não encontrada."), to=sid)
+        await sio.emit("melhoria.recusada", fato(pedido, motivo="Lapidária não encontrada.", solicitacao_id=solicitacao_id), to=sid)
         return
 
     lap = vila["lapidarias"][lid]
 
-    # 4. Validar situação: deve ser 'disponível'
+    # 5. Validar situação: deve ser 'disponível'
     if lap["situacao"] != "disponível":
-        await sio.emit("melhoria.recusada", fato(pedido, motivo=f"Lapidária não está disponível para melhoria (situação atual: {lap['situacao']})."), to=sid)
+        await sio.emit("melhoria.recusada", fato(pedido, motivo=f"Lapidária não está disponível para melhoria (situação atual: {lap['situacao']}).", solicitacao_id=solicitacao_id), to=sid)
         return
 
-    # 5. Validar nível atual: deve ser inferior a 3
+    # 6. Validar nível atual: deve ser inferior a 3
     if lap["nivel"] >= 3:
-        await sio.emit("melhoria.recusada", fato(pedido, motivo="Lapidária já atingiu o nível máximo (nível 3)."), to=sid)
+        await sio.emit("melhoria.recusada", fato(pedido, motivo="Lapidária já atingiu o nível máximo (nível 3).", solicitacao_id=solicitacao_id), to=sid)
         return
 
-    # 6. Validar estoque de cristais lapidados
+    # 7. Validar estoque de cristais lapidados
     custo = CUSTO_MELHORIA_N2 if lap["nivel"] == 1 else CUSTO_MELHORIA_N3
     if vila["lapidados"] < custo:
-        await sio.emit("melhoria.recusada", fato(pedido, motivo=f"Cristais lapidados insuficientes (necessário: {custo}, disponível: {vila['lapidados']})."), to=sid)
+        await sio.emit("melhoria.recusada", fato(pedido, motivo=f"Cristais lapidados insuficientes (necessário: {custo}, disponível: {vila['lapidados']}).", solicitacao_id=solicitacao_id), to=sid)
         return
 
-    # 7. Mutação atômica do estado e início da obra (sem await no meio)
+    # 8. Mutação atômica do estado e início da obra (sem await no meio)
     inicio = time.monotonic()
     nivel_atual = lap["nivel"]
     novo_nivel = nivel_atual + 1
@@ -414,6 +429,7 @@ async def solicitar_melhoria(sid, dados=None):
     try:
         await sio.emit("melhoria.iniciada", fato(
             pedido,
+            solicitacao_id=solicitacao_id,
             lapidaria_id=lid,
             nivel_atual=nivel_atual,
             novo_nivel=novo_nivel,

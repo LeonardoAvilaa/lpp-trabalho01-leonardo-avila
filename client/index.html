@@ -9,6 +9,15 @@
     .cartao, .painel { border: 1px solid #ccc; border-radius: 8px; padding: 12px; margin: 12px 0; }
     .erro-login { color: #c62828; background: #ffebee; border: 1px solid #ef9a9a; border-radius: 6px; padding: 8px 10px; margin-bottom: 10px; font-size: 13px; }
     .painel p { margin: 6px 0; }
+    .lapidarias-lista { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; margin: 10px 0; }
+    .lapidaria-card { border: 1px solid #ddd; border-radius: 6px; padding: 10px; background: #fff; cursor: pointer; transition: border-color 0.2s, background 0.2s; }
+    .lapidaria-card:hover { border-color: #1976d2; }
+    .lapidaria-card.selecionada { border-color: #1976d2; background: #f0f7ff; box-shadow: 0 0 0 2px #1976d2; }
+    .lapidaria-card h4 { margin: 0 0 6px; font-size: 14px; }
+    .vaga-item { font-size: 12px; margin: 4px 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .vaga-item progress { width: 90px; height: 12px; }
+    .detalhes-lapidaria { border: 1px solid #1976d2; border-radius: 8px; padding: 12px; margin: 12px 0; background: #f9fbff; }
+    .detalhes-lapidaria h3 { margin: 0 0 8px; font-size: 15px; color: #1976d2; }
     button { padding: 8px 14px; margin-right: 6px; border-radius: 6px; border: 1px solid #888; cursor: pointer; }
     button:disabled { opacity: 0.6; cursor: not-allowed; }
     input { padding: 8px; margin-bottom: 8px; width: 100%; box-sizing: border-box; }
@@ -66,6 +75,44 @@
       <p>👷 Trabalhadores: {{ estado.trabalhadores.ocupados }}/{{ estado.trabalhadores.limite }}
         <progress :value="estado.trabalhadores.ocupados" :max="estado.trabalhadores.limite"></progress></p>
       <p>🏛️ Lapidárias: {{ Object.keys(estado.lapidarias).length }}</p>
+    </section>
+
+    <!-- ETAPA 6.5: Seção de Lapidárias e Melhorias -->
+    <section class="painel lapidarias-secao">
+      <h3>🏛️ Lapidárias da Vila</h3>
+      <p v-if="Object.keys(estado.lapidarias).length === 0" class="vazio">Nenhuma lapidária construída ainda.</p>
+      <div v-else class="lapidarias-lista">
+        <div v-for="lap in estado.lapidarias" :key="lap.id"
+             class="lapidaria-card"
+             :class="{ selecionada: lapidariaSelecionadaId === lap.id }"
+             @click="selecionarLapidaria(lap.id)">
+          <h4>{{ lap.id }} ({{ lap.lote }})</h4>
+          <p>Nível: <strong>{{ lap.nivel }}</strong> · Situação: <em>{{ lap.situacao }}</em></p>
+          <div class="vagas-info">
+            <div v-for="v in lap.vagas" :key="v.numero" class="vaga-item">
+              <span>Vaga {{ v.numero }}: <strong>{{ v.ocupada ? 'Ocupada' : 'Livre' }}</strong></span>
+              <progress :value="v.ocupada ? Math.max(0, 10 - v.tempo_restante) : 0" max="10" :title="v.ocupada ? (10 - v.tempo_restante).toFixed(1) + 's / 10s' : 'Livre'"></progress>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Detalhes e Solicitação de Melhoria da Lapidária Selecionada -->
+      <div v-if="lapidariaSelecionada" class="detalhes-lapidaria">
+        <h3>🔍 Detalhes: {{ lapidariaSelecionada.id }}</h3>
+        <p>Lote: <strong>{{ lapidariaSelecionada.lote }}</strong> · Nível atual: <strong>{{ lapidariaSelecionada.nivel }}</strong></p>
+        <p>Situação: <strong>{{ lapidariaSelecionada.situacao }}</strong></p>
+        <div v-if="lapidariaSelecionada.nivel < 3">
+          <p>Próximo nível: <strong>{{ lapidariaSelecionada.nivel + 1 }}</strong> · Custo: <strong>{{ custoMelhoria(lapidariaSelecionada) }} cristais lapidados</strong></p>
+          <button :disabled="!podeMelhorar(lapidariaSelecionada)"
+                  @click="melhorarLapidaria(lapidariaSelecionada.id)">
+            ⬆️ Melhorar para Nível {{ lapidariaSelecionada.nivel + 1 }}
+          </button>
+        </div>
+        <div v-else>
+          <p>✨ Lapidária no nível máximo (Nível 3).</p>
+        </div>
+      </div>
     </section>
 
     <section>
@@ -273,6 +320,12 @@
         eventos.value.filter((e) => !(ocultarProducao.value && (e.nome === "mina.cristal_produzido" || e.nome === "recurso.produzido"))));
       const comandoTemporadaPendente = ref(false);
       const comandoConstrucaoPendente = ref(false);
+      const comandoMelhoriaPendente = ref(false);
+      const solicitacaoMelhoriaPendenteId = ref(null);
+      const lapidariaSelecionadaId = ref(null);
+      const lapidariaSelecionada = computed(() =>
+        lapidariaSelecionadaId.value ? estado.lapidarias[lapidariaSelecionadaId.value] || null : null
+      );
       const jogo = criarJogo();      // a vila desenhada (Phaser)
       let socket = null;
 
@@ -340,6 +393,8 @@
         erroEntrada.value = "";
         comandoTemporadaPendente.value = false;
         comandoConstrucaoPendente.value = false;
+        comandoMelhoriaPendente.value = false;
+        solicitacaoMelhoriaPendenteId.value = null;
         const nomeLimpo = (nome.value || "").trim();
         if (!nomeLimpo) {
           erroEntrada.value = "Informe um nome válido para entrar.";
@@ -360,6 +415,8 @@
           conectado.value = false;
           comandoTemporadaPendente.value = false;
           comandoConstrucaoPendente.value = false;
+          comandoMelhoriaPendente.value = false;
+          solicitacaoMelhoriaPendenteId.value = null;
           erroEntrada.value = (err && err.message) ? err.message : "Conexão recusada pelo servidor.";
           if (socket) {
             socket.disconnect();
@@ -371,6 +428,8 @@
           conectado.value = false;
           comandoTemporadaPendente.value = false;
           comandoConstrucaoPendente.value = false;
+          comandoMelhoriaPendente.value = false;
+          solicitacaoMelhoriaPendenteId.value = null;
         });
 
         socket.on("connect", () => {
@@ -384,6 +443,8 @@
         ouvir("estado.sincronizado", "Sincroniza estado inicial da vila", (d) => {
           comandoTemporadaPendente.value = false;
           comandoConstrucaoPendente.value = false;
+          comandoMelhoriaPendente.value = false;
+          solicitacaoMelhoriaPendenteId.value = null;
           atualizar(d);
         });
 
@@ -439,6 +500,44 @@
         });
 
         // ETAPA 6.5: ouvir lapidação e melhorias
+        ouvir("lapidaria.processamento_iniciado", "Inicia lapidação de cristal", (d) => {
+          atualizar(d);
+          const lapId = (d && d.lapidaria_id) || "lapidária";
+          const vaga = (d && d.vaga) || "";
+          avisar(`Lapidação iniciada na ${lapId} (vaga ${vaga})`, "info");
+        });
+
+        ouvir("lapidaria.cristal_lapidado", "Conclui lapidação de cristal", (d) => {
+          atualizar(d);
+          const lapId = (d && d.lapidaria_id) || "lapidária";
+          const vaga = (d && d.vaga) || "";
+          avisar(`Cristal lapidado na ${lapId} (vaga ${vaga})!`, "ok");
+        });
+
+        ouvir("melhoria.iniciada", "Inicia melhoria de nível da lapidária", (d) => {
+          if (d && d.solicitacao_id && d.solicitacao_id === solicitacaoMelhoriaPendenteId.value) {
+            comandoMelhoriaPendente.value = false;
+            solicitacaoMelhoriaPendenteId.value = null;
+          }
+          atualizar(d);
+          const lapId = (d && d.lapidaria_id) || "lapidária";
+          const novoNivel = (d && d.novo_nivel) || "";
+          avisar(`Melhoria da ${lapId} iniciada (nível ${novoNivel})!`, "info");
+        });
+
+        ouvir("melhoria.concluida", "Conclui melhoria da lapidária", (d) => {
+          atualizar(d);
+          const lapId = (d && d.lapidaria_id) || "lapidária";
+          const nivel = (d && d.nivel) || "";
+          avisar(`Melhoria da ${lapId} concluída (nível ${nivel})!`, "ok");
+        });
+
+        ouvir("melhoria.recusada", "Informa recusa na melhoria", (d) => {
+          comandoMelhoriaPendente.value = false;
+          solicitacaoMelhoriaPendenteId.value = null;
+          atualizar(d);
+          avisar(d && d.motivo ? d.motivo : "Melhoria recusada.", "erro");
+        });
       }
 
       // ===== PEDIDOS (emit): o cliente PEDE algo ao servidor =====
@@ -458,8 +557,49 @@
         pedir("vila.encerramento_solicitado");
       }
 
+      function selecionarLapidaria(lid) {
+        lapidariaSelecionadaId.value = (lapidariaSelecionadaId.value === lid) ? null : lid;
+      }
+
+      function custoMelhoria(lap) {
+        if (!lap) return null;
+        if (lap.nivel === 1) return 10;
+        if (lap.nivel === 2) return 15;
+        return null;
+      }
+
+      function podeMelhorar(lap) {
+        if (!lap || !socket || !socket.connected) return false;
+        if (papel.value !== "jogador") return false;
+        if (estado.fase !== "aberta") return false;
+        if (comandoMelhoriaPendente.value) return false;
+        if (lap.situacao !== "disponível") return false;
+        if (lap.nivel >= 3) return false;
+        const custo = custoMelhoria(lap);
+        if (custo === null || estado.lapidados < custo) return false;
+        return true;
+      }
+
+      function gerarSolicitacaoId() {
+        if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+          return crypto.randomUUID();
+        }
+        return "req-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 9);
+      }
+
+      function melhorarLapidaria(lid) {
+        const lap = estado.lapidarias[lid];
+        if (!lap || !podeMelhorar(lap)) return;
+        const reqId = gerarSolicitacaoId();
+        comandoMelhoriaPendente.value = true;
+        solicitacaoMelhoriaPendenteId.value = reqId;
+        pedir("melhoria.solicitada", { lapidaria_id: lid, solicitacao_id: reqId });
+      }
+
       return { nome, papel, conectado, erroEntrada, estado, avisos, eventosVisiveis, contadores, ocultarProducao,
-               comandoTemporadaPendente, comandoConstrucaoPendente, entrar, abrirVila, construir, encerrarVila };
+               comandoTemporadaPendente, comandoConstrucaoPendente, comandoMelhoriaPendente, solicitacaoMelhoriaPendenteId,
+               lapidariaSelecionadaId, lapidariaSelecionada, selecionarLapidaria, custoMelhoria, podeMelhorar, melhorarLapidaria,
+               entrar, abrirVila, construir, encerrarVila };
     }
   }).mount("#app");
 </script>

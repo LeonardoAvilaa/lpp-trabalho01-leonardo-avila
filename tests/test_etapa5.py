@@ -97,7 +97,7 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
         _, j1 = await self.preparar_vila_aberta_com_lapidaria(nivel=1, lapidados=10)
 
         with patch.object(server, "TEMPO_OBRA", 0.05):
-            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-01"})
 
         self.assertEqual(server.vila["lapidados"], 0)
         lap = server.vila["lapidarias"]["lapidaria-1"]
@@ -108,6 +108,7 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
         chamadas = [c for c in self.emit.call_args_list if c.args[0] == "melhoria.iniciada"]
         self.assertEqual(len(chamadas), 1)
         payload = chamadas[0].args[1]
+        self.assertEqual(payload["solicitacao_id"], "req-01")
         self.assertEqual(payload["lapidaria_id"], "lapidaria-1")
         self.assertEqual(payload["nivel_atual"], 1)
         self.assertEqual(payload["novo_nivel"], 2)
@@ -119,7 +120,7 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
         _, j1 = await self.preparar_vila_aberta_com_lapidaria(nivel=2, lapidados=20)
 
         with patch.object(server, "TEMPO_OBRA", 0.05):
-            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-02"})
 
         self.assertEqual(server.vila["lapidados"], 5)  # 20 - 15 = 5
         lap = server.vila["lapidarias"]["lapidaria-1"]
@@ -128,6 +129,7 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
         chamadas = [c for c in self.emit.call_args_list if c.args[0] == "melhoria.iniciada"]
         self.assertEqual(len(chamadas), 1)
         payload = chamadas[0].args[1]
+        self.assertEqual(payload["solicitacao_id"], "req-02")
         self.assertEqual(payload["nivel_atual"], 2)
         self.assertEqual(payload["novo_nivel"], 3)
         self.assertEqual(payload["custo"], 15)
@@ -136,7 +138,7 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
     async def test_03_recusa_nivel_maximo(self):
         _, j1 = await self.preparar_vila_aberta_com_lapidaria(nivel=3, lapidados=50)
 
-        await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+        await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-03"})
 
         self.assertEqual(server.vila["lapidados"], 50)
         lap = server.vila["lapidarias"]["lapidaria-1"]
@@ -145,43 +147,48 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
 
         chamadas = [c for c in self.emit.call_args_list if c.args[0] == "melhoria.recusada"]
         self.assertEqual(len(chamadas), 1)
+        self.assertEqual(chamadas[0].args[1]["solicitacao_id"], "req-03")
         self.assertIn("nível máximo", chamadas[0].args[1]["motivo"].lower())
 
     # 4. Recusa por saldo insuficiente
     async def test_04_recusa_saldo_insuficiente(self):
         _, j1 = await self.preparar_vila_aberta_com_lapidaria(nivel=1, lapidados=9)
 
-        await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+        await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-04a"})
 
         self.assertEqual(server.vila["lapidados"], 9)
         chamadas = [c for c in self.emit.call_args_list if c.args[0] == "melhoria.recusada"]
         self.assertEqual(len(chamadas), 1)
+        self.assertEqual(chamadas[0].args[1]["solicitacao_id"], "req-04a")
         self.assertIn("insuficientes", chamadas[0].args[1]["motivo"].lower())
 
         # Teste para nível 2 com 14 lapidados
         self.emit.reset_mock()
         server.vila["lapidarias"]["lapidaria-1"]["nivel"] = 2
         server.vila["lapidados"] = 14
-        await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+        await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-04b"})
         self.assertEqual(server.vila["lapidados"], 14)
         chamadas2 = [c for c in self.emit.call_args_list if c.args[0] == "melhoria.recusada"]
         self.assertEqual(len(chamadas2), 1)
+        self.assertEqual(chamadas2[0].args[1]["solicitacao_id"], "req-04b")
 
     # 5. Recusa de solicitante inválido (Mestre ou não-jogador)
     async def test_05_recusa_solicitante_invalido(self):
         m1, _ = await self.preparar_vila_aberta_com_lapidaria(nivel=1, lapidados=10)
 
         # Mestre tentando solicitar
-        await server.solicitar_melhoria(m1, {"lapidaria_id": "lapidaria-1"})
+        await server.solicitar_melhoria(m1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-05a"})
         chamadas = [c for c in self.emit.call_args_list if c.args[0] == "melhoria.recusada"]
         self.assertEqual(len(chamadas), 1)
+        self.assertEqual(chamadas[0].args[1]["solicitacao_id"], "req-05a")
         self.assertIn("apenas jogadores", chamadas[0].args[1]["motivo"].lower())
 
         # SID inexistente
         self.emit.reset_mock()
-        await server.solicitar_melhoria("fantasma", {"lapidaria_id": "lapidaria-1"})
+        await server.solicitar_melhoria("fantasma", {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-05b"})
         chamadas_fantasma = [c for c in self.emit.call_args_list if c.args[0] == "melhoria.recusada"]
         self.assertEqual(len(chamadas_fantasma), 1)
+        self.assertEqual(chamadas_fantasma[0].args[1]["solicitacao_id"], "req-05b")
 
     # 6. Recusa nas fases aguardando e encerrada
     async def test_06_recusa_fases_aguardando_e_encerrada(self):
@@ -198,42 +205,47 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
         }
 
         # Na fase aguardando
-        await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+        await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-06a"})
         chamadas = [c for c in self.emit.call_args_list if c.args[0] == "melhoria.recusada"]
         self.assertEqual(len(chamadas), 1)
+        self.assertEqual(chamadas[0].args[1]["solicitacao_id"], "req-06a")
         self.assertIn("aberta", chamadas[0].args[1]["motivo"].lower())
 
         # Na fase encerrada
         self.emit.reset_mock()
         server.vila["fase"] = "encerrada"
-        await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+        await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-06b"})
         chamadas2 = [c for c in self.emit.call_args_list if c.args[0] == "melhoria.recusada"]
         self.assertEqual(len(chamadas2), 1)
+        self.assertEqual(chamadas2[0].args[1]["solicitacao_id"], "req-06b")
 
     # 7. Recusa para lapidaria inexistente, em construção ou em melhoria
     async def test_07_recusa_lapidaria_inexistente_ou_ocupada(self):
         _, j1 = await self.preparar_vila_aberta_com_lapidaria(nivel=1, lapidados=20)
 
         # Inexistente
-        await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-999"})
+        await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-999", "solicitacao_id": "req-07a"})
         chamadas = [c for c in self.emit.call_args_list if c.args[0] == "melhoria.recusada"]
         self.assertEqual(len(chamadas), 1)
+        self.assertEqual(chamadas[0].args[1]["solicitacao_id"], "req-07a")
         self.assertIn("não encontrada", chamadas[0].args[1]["motivo"].lower())
 
         # Em construção
         self.emit.reset_mock()
         server.vila["lapidarias"]["lapidaria-1"]["situacao"] = "em construção"
-        await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+        await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-07b"})
         chamadas2 = [c for c in self.emit.call_args_list if c.args[0] == "melhoria.recusada"]
         self.assertEqual(len(chamadas2), 1)
+        self.assertEqual(chamadas2[0].args[1]["solicitacao_id"], "req-07b")
         self.assertIn("não está disponível", chamadas2[0].args[1]["motivo"].lower())
 
         # Em melhoria
         self.emit.reset_mock()
         server.vila["lapidarias"]["lapidaria-1"]["situacao"] = "em melhoria"
-        await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+        await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-07c"})
         chamadas3 = [c for c in self.emit.call_args_list if c.args[0] == "melhoria.recusada"]
         self.assertEqual(len(chamadas3), 1)
+        self.assertEqual(chamadas3[0].args[1]["solicitacao_id"], "req-07c")
 
     # 8. Confirmação de que melhorias não ocupam trabalhadores
     async def test_08_melhoria_nao_ocupa_trabalhadores(self):
@@ -241,7 +253,7 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
         server.vila["trabalhadores"] = 0
 
         with patch.object(server, "TEMPO_OBRA", 0.02):
-            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-08"})
             self.assertEqual(server.vila["trabalhadores"], 0)
             await asyncio.sleep(0.04)
 
@@ -266,7 +278,7 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
         vaga2["disponivel_desde"] = None
 
         with patch.object(server, "TEMPO_OBRA", 0.05):
-            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-09"})
 
         # Ambos os brutos foram devolvidos ao estoque global
         self.assertEqual(server.vila["brutos"], 2)
@@ -288,7 +300,7 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
         vaga["ciclo_id"] = 10
 
         with patch.object(server, "TEMPO_OBRA", 0.05):
-            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-10"})
 
         # Simula o término do temporizador de lapidação anterior (com ciclo_id antigo = 10)
         with patch.object(server, "TEMPO_LAPIDACAO", 0.01):
@@ -330,7 +342,7 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
         vaga1["disponivel_desde"] = None
 
         with patch.object(server, "TEMPO_OBRA", 0.05):
-            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-11"})
 
         # Aguarda a tarefa do dispatcher distribuir o cristal estornado
         await asyncio.sleep(0.02)
@@ -351,7 +363,7 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
         _, j1 = await self.preparar_vila_aberta_com_lapidaria(nivel=1, lapidados=10)
 
         with patch.object(server, "TEMPO_OBRA", 0.02):
-            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-12"})
             await asyncio.sleep(0.04)
 
         lap = server.vila["lapidarias"]["lapidaria-1"]
@@ -384,7 +396,7 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
         self.emit.side_effect = emit_com_latencia
 
         with patch.object(server, "TEMPO_OBRA", 0.02):
-            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-13"})
             await asyncio.sleep(0.08)
 
         self.assertIn("melhoria.concluida", ordem_eventos)
@@ -403,7 +415,7 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
         m1, j1 = await self.preparar_vila_aberta_com_lapidaria(nivel=1, lapidados=10, brutos=5)
 
         with patch.object(server, "TEMPO_OBRA", 0.05):
-            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-14"})
 
             # Encerra a vila enquanto a obra de melhoria está em andamento
             await asyncio.sleep(0.01)
@@ -448,7 +460,7 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
 
         # Solicitação de melhoria chega em seguida e é aceita com o saldo atualizado
         with patch.object(server, "TEMPO_OBRA", 0.02):
-            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-15a"})
 
         self.assertEqual(server.vila["lapidados"], 0)
         self.assertEqual(server.vila["lapidarias"]["lapidaria-1"]["situacao"], "em melhoria")
@@ -464,7 +476,7 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
 
         # Solicitação de melhoria é processada primeiro
         with patch.object(server, "TEMPO_OBRA", 0.05):
-            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-15b"})
 
         # O cristal bruto da vaga foi estornado e ciclo incrementado para 2
         self.assertEqual(server.vila["brutos"], 1)
@@ -519,7 +531,8 @@ class TestEtapa5EmProcesso(unittest.IsolatedAsyncioTestCase):
         self.emit.side_effect = emit_com_latencia_iniciada
 
         with patch.object(server, "TEMPO_OBRA", 0.1):
-            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1"})
+            await server.solicitar_melhoria(j1, {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-16"})
+            await asyncio.sleep(0.08)
             await asyncio.sleep(0.08)
 
         self.assertIn("melhoria.iniciada", ordem_eventos)
@@ -618,7 +631,7 @@ class TestProtocoloSocketIOEtapa5(unittest.TestCase):
         jogador.coletar_ate(tem_evento("construcao.concluida"), limite=5.0)
 
         # Solicita melhoria para nível 2
-        jogador.emitir("melhoria.solicitada", {"lapidaria_id": "lapidaria-1"})
+        jogador.emitir("melhoria.solicitada", {"lapidaria_id": "lapidaria-1", "solicitacao_id": "req-socketio"})
         jogador.coletar_ate(tem_evento("melhoria.iniciada"), limite=3.0)
         jogador.coletar_ate(tem_evento("melhoria.concluida"), limite=5.0)
 
