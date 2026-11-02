@@ -599,8 +599,8 @@ class TestProtocoloSocketIOEtapa4(unittest.TestCase):
 
         jogador.coletar_ate(tem_5_producoes, limite=12.0)
 
-        # Solicita construção de lapidária
-        jogador.emitir("construcao.solicitada")
+        # Solicita construção de lapidária com cristais brutos
+        jogador.emitir("construcao.solicitada", {"modalidade": "brutos"})
         jogador.coletar_ate(tem_evento("construcao.concluida"), limite=6.0)
 
         # Aguarda o próximo cristal da mina para disparar a lapidação e o evento lapidaria.processamento_iniciado

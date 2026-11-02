@@ -251,17 +251,29 @@ async def solicitar_construcao(sid, dados=None):
         await sio.emit("construcao.recusada", fato(pedido, motivo="Construções só são permitidas com a vila aberta."), to=sid)
         return
 
-    # 3. Validar recursos
-    if vila["brutos"] < CUSTO_CONSTRUCAO:
-        await sio.emit("construcao.recusada", fato(pedido, motivo="Cristais brutos insuficientes (necessário: 5)."), to=sid)
+    # 3. Validar modalidade escolhida
+    modalidade = dados.get("modalidade") if isinstance(dados, dict) else None
+
+    if modalidade not in ("brutos", "lapidados"):
+        await sio.emit("construcao.recusada", fato(pedido, motivo="Modalidade de construção inválida. Escolha 'brutos' ou 'lapidados'."), to=sid)
         return
 
-    # 4. Validar trabalhadores
+    # 4. Validar recursos da modalidade escolhida
+    if modalidade == "brutos":
+        if vila["brutos"] < CUSTO_CONSTRUCAO:
+            await sio.emit("construcao.recusada", fato(pedido, motivo="Cristais brutos insuficientes (necessário: 5)."), to=sid)
+            return
+    elif modalidade == "lapidados":
+        if vila["lapidados"] < CUSTO_CONSTRUCAO:
+            await sio.emit("construcao.recusada", fato(pedido, motivo="Cristais lapidados insuficientes (necessário: 5)."), to=sid)
+            return
+
+    # 5. Validar trabalhadores
     if vila["trabalhadores"] >= LIMITE_TRABALHADORES:
         await sio.emit("construcao.recusada", fato(pedido, motivo="Todos os trabalhadores estão ocupados (limite: 2)."), to=sid)
         return
 
-    # 5. Validar lotes
+    # 6. Validar lotes
     lote = proximo_lote_livre()
     if lote is None:
         await sio.emit("construcao.recusada", fato(pedido, motivo="Não há lotes disponíveis para construção (limite: 6)."), to=sid)
@@ -271,7 +283,10 @@ async def solicitar_construcao(sid, dados=None):
     inicio = time.monotonic()
     lid = f"lapidaria-{vila['proximo_id']}"
     vila["proximo_id"] += 1
-    vila["brutos"] -= CUSTO_CONSTRUCAO
+    if modalidade == "brutos":
+        vila["brutos"] -= CUSTO_CONSTRUCAO
+    else:
+        vila["lapidados"] -= CUSTO_CONSTRUCAO
     vila["trabalhadores"] += 1
     vila["lotes"][lote] = lid
     lap = {
@@ -295,6 +310,7 @@ async def solicitar_construcao(sid, dados=None):
             lapidaria_id=lid,
             lote=lote,
             custo=CUSTO_CONSTRUCAO,
+            modalidade=modalidade,
         ))
     finally:
         inicio_emitido.set()

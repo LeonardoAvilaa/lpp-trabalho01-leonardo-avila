@@ -120,7 +120,10 @@
         <button v-if="estado.fase === 'aguardando'" :disabled="comandoTemporadaPendente" @click="abrirVila">Abrir temporada</button>
         <button v-else-if="estado.fase === 'aberta'" :disabled="comandoTemporadaPendente" @click="encerrarVila">Encerrar temporada</button>
       </template>
-      <button v-else :disabled="comandoConstrucaoPendente" @click="construir">🔨 Construir</button>
+      <template v-else>
+        <button :disabled="comandoConstrucaoPendente || estado.brutos < 5" @click="construir('brutos')">💎 Construir com 5 cristais brutos</button>
+        <button :disabled="comandoConstrucaoPendente || estado.lapidados < 5" @click="construir('lapidados')">✨ Construir com 5 cristais lapidados</button>
+      </template>
     </section>
 
     <ul class="avisos">
@@ -195,15 +198,21 @@
         const pontos = mapa.getObjectLayer("pontos").objects;
         this.lotes = pontos.filter((p) => p.name.startsWith("lote"))
           .sort((a, b) => a.name.localeCompare(b.name, "pt", { numeric: true }));
-        this.acampamento = pontos.find((p) => p.name === "acampamento");
+        this.lotesPorNome = {};
+        pontos.filter((p) => p.name && p.name.startsWith("lote")).forEach((p) => {
+          this.lotesPorNome[p.name] = p;
+        });
+        this.acampamento = pontos.find((p) => p.name === "acampamento") || { x: 24, y: 20 };
 
         // 3) câmera: o mapa é pequeno (pixel art), então damos zoom 2x
         this.cameras.main.setZoom(2).centerOn(mapa.widthInPixels / 2, mapa.heightInPixels / 2);
         this.larg = mapa.widthInPixels;
         this.alt = mapa.heightInPixels;
 
-        this.obras = [];      // obras em andamento (a primeira a começar é a primeira a terminar)
-        this.usados = 0;      // quantos lotes já foram usados
+        this.obras = {};          // obras em andamento por lid
+        this.lapidarias = {};     // lapidarias concluídas por lid
+        this.filtroNoite = null;
+
         this.faixa = this.add.text(this.larg / 2, 9, "⏳ Aguardando o Mestre", {
           fontSize: "8px", color: "#ffffff", backgroundColor: "#00000099",
           padding: { x: 5, y: 2 }, resolution: 2,
@@ -214,20 +223,95 @@
       }
 
       // ----- apoio -----
+      pontoLote(nomeLote) {
+        if (!nomeLote) return null;
+        return this.lotesPorNome[nomeLote] || this.lotesPorNome["lote" + nomeLote] || this.lotes[0] || null;
+      }
       lote(i) { return this.lotes[i % this.lotes.length]; }
+
+      removerObra(lid) {
+        const o = this.obras[lid];
+        if (o) {
+          if (o.barra) this.tweens.killTweensOf(o.barra);
+          if (o.canteiro) o.canteiro.destroy();
+          if (o.fundo) o.fundo.destroy();
+          if (o.barra) o.barra.destroy();
+          delete this.obras[lid];
+        }
+      }
+
+      criarOuAtualizarObra(lid, nomeLote, duracaoMs = 3000) {
+        const p = this.pontoLote(nomeLote);
+        if (!p) return;
+        if (this.obras[lid]) return;
+
+        const x = p.x;
+        const y = p.y;
+        const canteiro = this.add.sprite(x, y, "sprites", 1).setDepth(2);
+        const fundo = this.add.rectangle(x - 10, y + 16, 20, 3, 0x333333).setOrigin(0, 0.5).setDepth(3);
+        const barra = this.add.rectangle(x - 10, y + 16, 20, 3, 0xffd54a).setOrigin(0, 0.5).setDepth(4);
+        barra.scaleX = 0;
+        if (duracaoMs > 0) {
+          this.tweens.add({ targets: barra, scaleX: 1, duration: duracaoMs });
+        } else {
+          barra.scaleX = 1;
+        }
+        this.obras[lid] = { canteiro, fundo, barra, lote: p.name || nomeLote, x, y };
+      }
+
+      criarOuAtualizarLapidaria(lid, nomeLote, nivel = 1, animar = false) {
+        const p = this.pontoLote(nomeLote);
+        if (!p) return;
+
+        this.removerObra(lid);
+        const loteAlvo = p.name || nomeLote;
+        Object.keys(this.obras).forEach((k) => {
+          if (this.obras[k].lote === loteAlvo) this.removerObra(k);
+        });
+
+        const lapExistente = this.lapidarias[lid];
+        if (lapExistente) {
+          lapExistente.nivel = nivel;
+          if (lapExistente.rotulo) {
+            lapExistente.rotulo.setText(`Nv. ${nivel}`);
+          }
+          if (animar && lapExistente.sprite) {
+            this.tweens.add({
+              targets: lapExistente.sprite,
+              scale: { from: 1.3, to: 1 },
+              duration: 300,
+              ease: "Back.Out",
+            });
+            this.flutuar(`✨ Nível ${nivel}!`, p.x, p.y - 18, "#1b5e20");
+          }
+          return lapExistente;
+        }
+
+        const x = p.x;
+        const y = p.y;
+        const sprite = this.add.sprite(x, y, "sprites", 0).setDepth(2);
+        const rotulo = this.add.text(x, y - 14, `Nv. ${nivel}`, {
+          fontSize: "7px", color: "#ffffff", backgroundColor: "#00000099",
+          padding: { x: 2, y: 1 }, resolution: 2,
+        }).setOrigin(0.5).setDepth(6);
+
+        if (animar) {
+          this.tweens.add({ targets: sprite, scale: { from: 0.3, to: 1 }, duration: 400, ease: "Back.Out" });
+          this.flutuar("🏛️ Lapidária concluída!", x, y - 18, "#1b5e20");
+        }
+
+        this.lapidarias[lid] = { sprite, rotulo, lote: loteAlvo, nivel, x, y };
+        return this.lapidarias[lid];
+      }
+
       criarCasa(x, y) {
-        const casa = this.add.sprite(x, y, "sprites", 0);
+        const casa = this.add.sprite(x, y, "sprites", 0).setDepth(2);
         this.tweens.add({ targets: casa, scale: { from: 0.3, to: 1 }, duration: 400, ease: "Back.Out" });
       }
       criarObra(duracao) {
-        const { x, y } = this.lote(this.usados++);
-        const canteiro = this.add.sprite(x, y, "sprites", 1);
-        const fundo = this.add.rectangle(x - 10, y + 16, 20, 3, 0x333333).setOrigin(0, 0.5);
-        const barra = this.add.rectangle(x - 10, y + 16, 20, 3, 0xffd54a).setOrigin(0, 0.5);
-        barra.scaleX = 0;
-        this.tweens.add({ targets: barra, scaleX: 1, duration: duracao });
-        this.obras.push({ canteiro, fundo, barra, x, y });
+        this.criarOuAtualizarObra("temp-" + Date.now(), "lote1", duracao);
       }
+
       flutuar(texto, x, y, cor) {
         const t = this.add.text(x, y, texto, {
           fontSize: "8px", color: cor, fontStyle: "bold", stroke: "#ffffff",
@@ -236,40 +320,121 @@
         this.tweens.add({ targets: t, y: y - 16, alpha: 0, duration: 1400, onComplete: () => t.destroy() });
       }
 
+      atualizarFase(fase) {
+        if (!this.faixa) return;
+        if (fase === "aberta") {
+          this.faixa.setVisible(false);
+          if (this.filtroNoite) {
+            this.filtroNoite.destroy();
+            this.filtroNoite = null;
+          }
+        } else if (fase === "encerrada") {
+          this.faixa.setText("🌙 Temporada encerrada");
+          this.faixa.setVisible(true);
+          if (!this.filtroNoite) {
+            this.filtroNoite = this.add.rectangle(this.larg / 2, this.alt / 2, this.larg, this.alt, 0x000033, 0.35).setDepth(5);
+          }
+        } else {
+          this.faixa.setText("⏳ Aguardando o Mestre");
+          this.faixa.setVisible(true);
+          if (this.filtroNoite) {
+            this.filtroNoite.destroy();
+            this.filtroNoite = null;
+          }
+        }
+      }
+
       // ----- um método para cada evento do servidor -----
       mostrarEstado(estado) {                 // estado.sincronizado
-        for (let i = 0; i < estado.concluidas; i++) {
-          const p = this.lote(this.usados++);
-          this.criarCasa(p.x, p.y);
+        if (!estado) return;
+        if (estado.fase) this.atualizarFase(estado.fase);
+
+        if (estado.lapidarias) {
+          Object.keys(this.lapidarias).forEach((lid) => {
+            if (!estado.lapidarias[lid]) {
+              const lap = this.lapidarias[lid];
+              if (lap.sprite) lap.sprite.destroy();
+              if (lap.rotulo) lap.rotulo.destroy();
+              delete this.lapidarias[lid];
+            }
+          });
+
+          Object.values(estado.lapidarias).forEach((lap) => {
+            if (lap.situacao === "em construção") {
+              let duracao = 3000;
+              if (estado.construcoes && Array.isArray(estado.construcoes)) {
+                const c = estado.construcoes.find((item) => item.lid === lap.id);
+                if (c && c.tempo_restante !== undefined) duracao = Math.max(0, c.tempo_restante * 1000);
+              }
+              this.criarOuAtualizarObra(lap.id, lap.lote, duracao);
+            } else {
+              this.criarOuAtualizarLapidaria(lap.id, lap.lote, lap.nivel || 1, false);
+            }
+          });
         }
-        for (let i = 0; i < estado.em_obra; i++) this.criarObra(estado.tempo_obra * 1000);
-        if (estado.fase === "aberta") this.vilaIniciada();
-        if (estado.fase === "encerrada") this.vilaEncerrada();
       }
-      vilaIniciada() {                        // vila.iniciada
-        this.faixa.setText("☀️ Temporada aberta");
+
+      vilaIniciada() {                        // vila.aberta
+        this.atualizarFase("aberta");
       }
-      obraIniciada(estado) {                  // construcao.iniciada
-        this.criarObra(estado.tempo_obra * 1000);
-        this.flutuar("-" + estado.custo + " 🪵", this.acampamento.x, this.acampamento.y, "#b00020");
+
+      obraIniciada(dados) {                  // construcao.iniciada
+        const d = dados || {};
+        const est = d.estado || d;
+        const lid = d.lapidaria_id || (est.construcoes && est.construcoes[0] && est.construcoes[0].lid) || "lapidaria-1";
+        const lote = d.lote || (est.lapidarias && est.lapidarias[lid] && est.lapidarias[lid].lote);
+        let duracao = 3000;
+        if (est.construcoes && Array.isArray(est.construcoes)) {
+          const c = est.construcoes.find((item) => item.lid === lid);
+          if (c && c.tempo_restante !== undefined) duracao = Math.max(0, c.tempo_restante * 1000);
+        }
+        this.criarOuAtualizarObra(lid, lote, duracao);
+        const custo = d.custo || 5;
+        const icone = (d.modalidade === "lapidados") ? "✨" : "💎";
+        this.flutuar("-" + custo + " " + icone, this.acampamento.x, this.acampamento.y, "#b00020");
       }
-      obraConcluida(estado) {                 // construcao.concluida
-        const obra = this.obras.shift();
-        if (!obra) return;
-        obra.canteiro.destroy(); obra.fundo.destroy(); obra.barra.destroy();
-        this.criarCasa(obra.x, obra.y);
-        this.flutuar("🏠 Obra concluída!", obra.x, obra.y - 18, "#1b5e20");
+
+      obraConcluida(dados) {                 // construcao.concluida
+        const d = dados || {};
+        const est = d.estado || d;
+        const lid = d.lapidaria_id || (est.lapidarias && Object.keys(est.lapidarias).slice(-1)[0]);
+        const lote = d.lote || (est.lapidarias && est.lapidarias[lid] && est.lapidarias[lid].lote) || (this.obras[lid] && this.obras[lid].lote);
+        const nivel = d.nivel || (est.lapidarias && est.lapidarias[lid] && est.lapidarias[lid].nivel) || 1;
+        this.criarOuAtualizarLapidaria(lid, lote, nivel, true);
       }
-      recursoProduzido(estado) {              // recurso.produzido
-        this.flutuar("+" + estado.producao + " 🪵", this.acampamento.x, this.acampamento.y, "#1b5e20");
+
+      melhoriaIniciada(dados) {              // melhoria.iniciada
+        const d = dados || {};
+        const lid = d.lapidaria_id;
+        const lap = this.lapidarias[lid];
+        const custo = d.custo || 10;
+        if (lap) {
+          this.flutuar("-" + custo + " ✨", lap.x, lap.y - 18, "#b00020");
+        }
       }
+
+      melhoriaConcluida(dados) {             // melhoria.concluida
+        const d = dados || {};
+        const est = d.estado || d;
+        const lid = d.lapidaria_id;
+        const lote = d.lote || (est.lapidarias && est.lapidarias[lid] && est.lapidarias[lid].lote) || (this.lapidarias[lid] && this.lapidarias[lid].lote);
+        const nivel = d.nivel || (est.lapidarias && est.lapidarias[lid] && est.lapidarias[lid].nivel) || 2;
+        this.criarOuAtualizarLapidaria(lid, lote, nivel, true);
+      }
+
+      recursoProduzido(dados) {              // mina.cristal_produzido
+        const d = dados || {};
+        const qtd = d.producao || 1;
+        this.flutuar("+" + qtd + " 💎", this.acampamento.x, this.acampamento.y, "#1b5e20");
+      }
+
       recusado(motivo) {                      // operacao.recusada (só quem pediu)
         this.cameras.main.shake(180, 0.006);
         this.flutuar("✋ " + motivo, this.larg / 2, this.alt - 28, "#b00020");
       }
+
       vilaEncerrada() {                       // vila.encerrada
-        this.faixa.setText("🌙 Temporada encerrada");
-        this.add.rectangle(this.larg / 2, this.alt / 2, this.larg, this.alt, 0x000033, 0.35).setDepth(5);
+        this.atualizarFase("encerrada");
       }
     }
 
@@ -282,9 +447,12 @@
         });
       },
       mostrarEstado: (...a) => chamar("mostrarEstado", ...a),
+      atualizarFase: (...a) => chamar("atualizarFase", ...a),
       vilaIniciada: (...a) => chamar("vilaIniciada", ...a),
       obraIniciada: (...a) => chamar("obraIniciada", ...a),
       obraConcluida: (...a) => chamar("obraConcluida", ...a),
+      melhoriaIniciada: (...a) => chamar("melhoriaIniciada", ...a),
+      melhoriaConcluida: (...a) => chamar("melhoriaConcluida", ...a),
       recursoProduzido: (...a) => chamar("recursoProduzido", ...a),
       recusado: (...a) => chamar("recusado", ...a),
       vilaEncerrada: (...a) => chamar("vilaEncerrada", ...a),
@@ -342,7 +510,10 @@
       function atualizar(d) {
         if (!d || !d.estado) return;
         const e = d.estado;
-        if (e.fase !== undefined) estado.fase = e.fase;
+        if (e.fase !== undefined) {
+          estado.fase = e.fase;
+          jogo.atualizarFase(e.fase);
+        }
         if (e.brutos !== undefined) estado.brutos = e.brutos;
         if (e.lapidados !== undefined) estado.lapidados = e.lapidados;
         if (e.trabalhadores) {
@@ -451,34 +622,40 @@
           comandoMelhoriaPendente.value = false;
           solicitacaoMelhoriaPendenteId.value = null;
           atualizar(d);
+          if (d && d.estado) jogo.mostrarEstado(d.estado);
         });
 
         // ETAPA 6.2: ouvir "vila.aberta", "vila.encerrada" e recusas
         ouvir("vila.aberta", "Confirma a abertura da temporada", (d) => {
           comandoTemporadaPendente.value = false;
           atualizar(d);
+          jogo.vilaIniciada();
           avisar("Temporada da vila aberta!", "ok");
         });
 
         ouvir("vila.abertura_recusada", "Informa recusa na abertura da temporada", (d) => {
           comandoTemporadaPendente.value = false;
+          if (d && d.motivo) jogo.recusado(d.motivo);
           avisar(d && d.motivo ? d.motivo : "Abertura da temporada recusada.", "erro");
         });
 
         ouvir("vila.encerrada", "Confirma o encerramento da temporada", (d) => {
           comandoTemporadaPendente.value = false;
           atualizar(d);
+          jogo.vilaEncerrada();
           avisar("Temporada da vila encerrada!", "info");
         });
 
         ouvir("vila.encerramento_recusado", "Informa recusa no encerramento da temporada", (d) => {
           comandoTemporadaPendente.value = false;
+          if (d && d.motivo) jogo.recusado(d.motivo);
           avisar(d && d.motivo ? d.motivo : "Encerramento da temporada recusado.", "erro");
         });
 
         // ETAPA 6.3: ouvir "mina.cristal_produzido"
         ouvir("mina.cristal_produzido", "Atualiza estoque com novo cristal extraído", (d) => {
           atualizar(d);
+          jogo.recursoProduzido(d);
         });
         // ETAPA 6.4: ouvir "construcao.iniciada", "construcao.concluida", "construcao.recusada"
         ouvir("construcao.iniciada", "Inicia obra no lote", (d) => {
@@ -486,13 +663,16 @@
             comandoConstrucaoPendente.value = false;
           }
           atualizar(d);
+          jogo.obraIniciada(d);
           const lapId = (d && d.lapidaria_id) || "lapidária";
           const lote = (d && d.lote) || "";
-          avisar(`Construção da ${lapId} iniciada no ${lote}!`, "info");
+          const recNome = (d && d.modalidade === "lapidados") ? "cristais lapidados" : "cristais brutos";
+          avisar(`Construção da ${lapId} iniciada no ${lote} (${(d && d.custo) || 5} ${recNome})!`, "info");
         });
 
         ouvir("construcao.concluida", "Conclui obra da lapidária", (d) => {
           atualizar(d);
+          jogo.obraConcluida(d);
           const lapId = (d && d.lapidaria_id) || "lapidária";
           const lote = (d && d.lote) || "";
           avisar(`Lapidária ${lapId} concluída no ${lote}!`, "ok");
@@ -501,6 +681,7 @@
         ouvir("construcao.recusada", "Informa recusa na construção", (d) => {
           comandoConstrucaoPendente.value = false;
           atualizar(d);
+          if (d && d.motivo) jogo.recusado(d.motivo);
           avisar(d && d.motivo ? d.motivo : "Construção recusada.", "erro");
         });
 
@@ -525,6 +706,7 @@
             solicitacaoMelhoriaPendenteId.value = null;
           }
           atualizar(d);
+          jogo.melhoriaIniciada(d);
           const lapId = (d && d.lapidaria_id) || "lapidária";
           const novoNivel = (d && d.novo_nivel) || "";
           avisar(`Melhoria da ${lapId} iniciada (nível ${novoNivel})!`, "info");
@@ -532,6 +714,7 @@
 
         ouvir("melhoria.concluida", "Conclui melhoria da lapidária", (d) => {
           atualizar(d);
+          jogo.melhoriaConcluida(d);
           const lapId = (d && d.lapidaria_id) || "lapidária";
           const nivel = (d && d.nivel) || "";
           avisar(`Melhoria da ${lapId} concluída (nível ${nivel})!`, "ok");
@@ -541,6 +724,7 @@
           comandoMelhoriaPendente.value = false;
           solicitacaoMelhoriaPendenteId.value = null;
           atualizar(d);
+          if (d && d.motivo) jogo.recusado(d.motivo);
           avisar(d && d.motivo ? d.motivo : "Melhoria recusada.", "erro");
         });
       }
@@ -551,10 +735,11 @@
         comandoTemporadaPendente.value = true;
         pedir("vila.abertura_solicitada");
       }
-      function construir() {
+      function construir(modalidade) {
         if (!socket || !socket.connected || papel.value !== "jogador" || estado.fase !== "aberta" || comandoConstrucaoPendente.value) return;
+        if (modalidade !== "brutos" && modalidade !== "lapidados") return;
         comandoConstrucaoPendente.value = true;
-        pedir("construcao.solicitada");
+        pedir("construcao.solicitada", { modalidade });
       }
       function encerrarVila() {
         if (!socket || !socket.connected || papel.value !== "mestre" || estado.fase !== "aberta" || comandoTemporadaPendente.value) return;

@@ -626,8 +626,8 @@ class TestProtocoloSocketIOEtapa5(unittest.TestCase):
 
         jogador.coletar_ate(tem_5_producoes, limite=10.0)
 
-        # Solicita construção da lapidária de nível 1
-        jogador.emitir("construcao.solicitada")
+        # Solicita construção da lapidária de nível 1 com cristais brutos
+        jogador.emitir("construcao.solicitada", {"modalidade": "brutos"})
         jogador.coletar_ate(tem_evento("construcao.concluida"), limite=5.0)
 
         # Solicita melhoria para nível 2

@@ -50,9 +50,12 @@ Ambos os estoques são globais, ilimitados e iniciam em zero (`0`).
 
 ### 3.1 Construção de Nova Lapidária
 - Uma nova lapidária é sempre construída no **Nível 1**.
-- **Custo de construção:** 5 cristais brutos. Não requer cristais lapidados.
+- **Modalidades de construção e custos:** O jogador deve escolher explicitamente uma das duas modalidades de pagamento antes de solicitar a construção:
+  - **Cristais brutos:** 5 cristais brutos;
+  - **Cristais lapidados:** 5 cristais lapidados.
+- Não há conversão automática entre recursos nem débito simultâneo dos dois estoques.
 - **Duração da obra:** 3 segundos.
-- O custo em cristais brutos é debitado imediatamente no momento em que o pedido é validado e aceito pelo servidor.
+- O custo de exatamente 5 unidades do recurso escolhido é debitado imediatamente no momento em que o pedido é validado e aceito pelo servidor de forma atômica. O recurso não selecionado não sofre nenhum débito.
 - O lote atribuído fica reservado e ocupado desde o início da obra.
 - A construção não pode ser cancelada nem reembolsada.
 - Podem ocorrer construções simultâneas em lotes diferentes, desde que respeitado o limite de trabalhadores.
@@ -62,7 +65,7 @@ As lapidárias podem evoluir do Nível 1 até o Nível 3. O custo de construçã
 
 | Nível | Vagas simultâneas | Custo para alcançar o nível | Duração da operação |
 | :---: | :---------------: | :-------------------------- | :-----------------: |
-| **1** | 1 cristal por vez | **Construção:** 5 cristais brutos | 3 segundos          |
+| **1** | 1 cristal por vez | **Construção:** 5 cristais brutos ou 5 cristais lapidados | 3 segundos          |
 | **2** | 2 cristais por vez | **Melhoria:** 10 cristais lapidados | 3 segundos          |
 | **3** | 3 cristais por vez | **Melhoria:** 15 cristais lapidados | 3 segundos          |
 
@@ -201,7 +204,7 @@ No momento exato em que a temporada é encerrada:
 ### 8.2 Independência Operacional entre Estruturas Distintas
 - Operações em estruturas diferentes não se bloqueiam mutuamente. Uma melhoria em andamento em uma lapidária não impede a construção de uma nova lapidária em outro lote desocupado, nem impede a solicitação de melhoria em outra estrutura distinta.
 - Cada operação é julgada de forma autônoma pelo servidor com base nos requisitos específicos de cada ação, sem excluir as condições gerais de autorização do participante, fase aberta da temporada e validação prévia pelo servidor:
-  - Para a construção de nova estrutura, os requisitos específicos compreendem saldo suficiente em cristais brutos, existência de lote vago no mapa e trabalhador disponível (`trabalhadores < limite`).
+  - Para a construção de nova estrutura, os requisitos específicos compreendem seleção de modalidade válida (`brutos` ou `lapidados`), saldo suficiente no recurso selecionado (5 cristais brutos ou 5 cristais lapidados), existência de lote vago no mapa e trabalhador disponível (`trabalhadores < limite`).
   - Para a melhoria em uma estrutura existente, os requisitos específicos compreendem saldo suficiente em cristais lapidados, situação `disponível` daquela lapidária específica e nível inferior ao máximo (3), sem demandar alocação de trabalhadores.
 - A restrição de bloqueio operacional é rigorosamente circunscrita à mesma estrutura: uma mesma lapidária jamais pode executar duas operações simultâneas (não pode sofrer melhoria enquanto estiver em construção ou executando outra melhoria).
 
@@ -226,10 +229,10 @@ A tabela a seguir consolida os **19 eventos** que compõem o catálogo canônico
 | 6 | `vila.encerramento_solicitado` | Mestre | Servidor | Pedido do Mestre para encerrar a temporada. | Identificação do Mestre solicitante. | Nenhuma (o pedido não muta o estado). |
 | 7 | `vila.encerrada` | Servidor | Todos | Confirma publicamente o encerramento da temporada. | Causa do fato (`vila.encerramento_solicitado`) e estado da vila no instante do encerramento, incluindo operações pendentes em andamento. | Fase passa imediatamente para `encerrada`; mina para; processamentos ativos são interrompidos com estorno de cristais brutos ao estoque. Obras e melhorias em andamento continuam até a conclusão (emitindo `construcao.concluida` ou `melhoria.concluida` ao terminarem); novos pedidos de construção e melhoria são bloqueados. |
 | 8 | `vila.encerramento_recusado` | Servidor | Mestre | Informa ao Mestre a recusa do encerramento. | Motivo da recusa (solicitante não é Mestre ou fase não é `aberta`) e causa. | Nenhuma. |
-| 9 | `construcao.solicitada` | Jogador | Servidor | Pedido emitido por um jogador para erguer uma nova lapidária. | Identificação do jogador solicitante. | Nenhuma (o pedido não muta o estado). |
-| 10 | `construcao.iniciada` | Servidor | Todos | Confirma o início da obra de uma nova lapidária de nível 1. | Solicitante, identificador da lapidária, lote alocado, custo debitado, causa e estado atualizado. | Debita 5 cristais brutos; ocupa 1 lote; ocupa 1 trabalhador (`trabalhadores + 1`); inicia obra de 3s. |
+| 9 | `construcao.solicitada` | Jogador | Servidor | Pedido emitido por um jogador para erguer uma nova lapidária. | Modalidade escolhida (`brutos` ou `lapidados`). O solicitante é identificado pelo servidor via `sid` da conexão Socket.IO autenticada (não é enviado pelo cliente no payload). | Nenhuma (o pedido não muta o estado). |
+| 10 | `construcao.iniciada` | Servidor | Todos | Confirma o início da obra de uma nova lapidária de nível 1. | Solicitante, identificador da lapidária, lote alocado, custo debitado (5), modalidade utilizada (`brutos` ou `lapidados`), causa e estado atualizado. | Debita 5 unidades do recurso selecionado (cristais brutos ou cristais lapidados); ocupa 1 lote; ocupa 1 trabalhador (`trabalhadores + 1`); inicia obra de 3s. |
 | 11 | `construcao.concluida` | Servidor | Todos | Informa a entrega e prontidão de uma lapidária de nível 1. | Identificador da lapidária, lote ocupado, nível inicial (1), situação (`disponível`) e estado atualizado. | Libera 1 trabalhador (`trabalhadores - 1`); lapidária passa à situação `disponível` no nível 1. |
-| 12 | `construcao.recusada` | Servidor | Solicitante | Informa a rejeição da solicitação de construção. | Motivo específico da recusa (`Sem trabalhador livre`, recursos insuficientes, etc.) e causa. | Nenhuma alteração; nenhum recurso é debitado. |
+| 12 | `construcao.recusada` | Servidor | Solicitante | Informa a rejeição da solicitação de construção. | Motivo específico da recusa (modalidade inválida, saldo insuficiente no recurso escolhido, `Sem trabalhador livre`, falta de lotes, etc.) e causa. | Nenhuma alteração; nenhum recurso é debitado. |
 | 13 | `melhoria.solicitada` | Jogador | Servidor | Pedido emitido por um jogador para elevar o nível de uma lapidária. | Identificador da lapidária-alvo e identificação do solicitante. | Nenhuma (o pedido não muta o estado). |
 | 14 | `melhoria.iniciada` | Servidor | Todos | Confirma o início da obra de melhoria da lapidária. | Identificador da lapidária, nível atual, novo nível pretendido, custo debitado, causa e estado. | Debita cristais lapidados (10 ou 15); estrutura assume `em melhoria`; lapidações ativas são canceladas com estorno de brutos; inicia temporizador de 3s. |
 | 15 | `melhoria.concluida` | Servidor | Todos | Informa a conclusão da melhoria da lapidária. | Identificador da lapidária, novo nível atingido (2 ou 3), novas vagas liberadas e estado atualizado. | Lapidária retorna à situação `disponível` com nova capacidade. Se a temporada estiver na fase `aberta` e houver cristais brutos disponíveis, o servidor retoma o processamento automático, respeitando a fila FIFO global. Caso contrário, permanece em repouso. |
@@ -246,11 +249,12 @@ A tabela a seguir consolida os **19 eventos** que compõem o catálogo canônico
 - **Dado que** a temporada da vila encontra-se na fase `aberta`,
 - **e** o estoque comunitário de cristais brutos contém exatamente 3 unidades,
 - **e** existem trabalhadores livres na vila (`0/2`) e lotes desocupados disponíveis,
-- **quando** um jogador emite o pedido `construcao.solicitada` (cujo custo é de 5 cristais brutos),
+- **quando** um jogador emite o pedido `construcao.solicitada` escolhendo a modalidade de cristais brutos (cujo custo é de 5 cristais brutos),
 - **então** o servidor valida o saldo e constata a insuficiência de 2 cristais brutos,
 - **e** emite o evento `construcao.recusada` unicamente para o jogador solicitante, informando a carência de recursos,
 - **e** o estoque de cristais brutos permanece inalterado em 3 unidades,
 - **e** nenhum lote do mapa é reservado e nenhum trabalhador é ocupado (`0/2`).
+*(Regra análoga aplica-se à modalidade de cristais lapidados quando o estoque lapidado for inferior a 5 unidades).*
 
 ---
 
@@ -258,7 +262,7 @@ A tabela a seguir consolida os **19 eventos** que compõem o catálogo canônico
 - **Dado que** a vila encontra-se no estado inicial com estoques zerados (`0` cristais brutos e `0` cristais lapidados), nenhum lote ocupado e nenhum trabalhador ocupado (`0/2`),
 - **quando** o Mestre emite o pedido `vila.abertura_solicitada` e o servidor emite `vila.aberta` para todos, iniciando a contagem de 2 segundos para a primeira extração da Mina;
 - **e** a Mina opera continuamente a cada 2 segundos, emitindo `mina.cristal_produzido` a cada extração até acumular 5 cristais brutos no estoque geral (aos 10 segundos da temporada, após a quinta extração);
-- **e** aos 10 segundos um jogador emite o pedido `construcao.solicitada` para erguer a primeira lapidária da vila;
+- **e** aos 10 segundos um jogador emite o pedido `construcao.solicitada` (modalidade: cristais brutos) para erguer a primeira lapidária da vila;
 - **então** o servidor valida os requisitos, aceita a solicitação, debita 5 cristais brutos do estoque (saldo bruto vai a zero), reserva o `lote1`, ocupa 1 trabalhador (`1/2`) e emite `construcao.iniciada` para todos, iniciando a obra de 3 segundos;
 - **quando** o tempo avança até os 12 segundos da temporada, a Mina realiza sua sexta extração (`mina.cristal_produzido`), elevando o estoque para 1 cristal bruto;
 - **e** aos 13 segundos transcorrem os 3 segundos da construção, o servidor encerra o temporizador da obra, emite `construcao.concluida` para todos, entrega a `lapidaria-1` de Nível 1 na situação `disponível` e libera automaticamente o trabalhador (`0/2`);
@@ -278,11 +282,12 @@ A tabela a seguir consolida os **19 eventos** que compõem o catálogo canônico
 - **Dado que** a temporada da vila encontra-se na fase `aberta`,
 - **e** o estoque comunitário possui exatamente 5 cristais brutos,
 - **e** existem trabalhadores livres (`0/2`) e lotes vagos no cenário,
-- **quando** os jogadores A e B emitem o pedido `construcao.solicitada` quase simultaneamente,
+- **quando** os jogadores A e B emitem o pedido `construcao.solicitada` (modalidade: cristais brutos) quase simultaneamente,
 - **então** o servidor enfileira e avalia as requisições em ordem sequencial estrita:
   1. A requisição do jogador A é avaliada primeiro: o servidor confirma saldo de 5 cristais brutos, debita integralmente o montante (reduzindo o saldo a zero), aloca o lote vago, ocupa 1 trabalhador (`1/2`) e emite `construcao.iniciada` para todos os participantes;
   2. A requisição do jogador B é avaliada na sequência: o servidor constata que o saldo de cristais brutos encontra-se zerado e emite `construcao.recusada` exclusivamente para o jogador B por insuficiência de recursos;
 - **e** o saldo final encerra exatamente em zero, sem cobrança duplicada, sem saldo negativo e sem inconsistência de estado.
+*(Regra idêntica aplica-se a disputas concorrentes na modalidade de cristais lapidados).*
 
 ---
 
@@ -291,11 +296,11 @@ A tabela a seguir consolida os **19 eventos** que compõem o catálogo canônico
 - **e** existem dois trabalhadores livres na vila (`0/2`),
 - **e** o estoque comunitário dispõe de recursos abundantes (mínimo de 15 cristais brutos) e há múltiplos lotes vagos,
 - **quando** a seguinte sequência de eventos é processada:
-  1. O jogador A emite `construcao.solicitada`. O servidor valida e aceita sequencialmente o pedido: debita 5 cristais brutos, aloca o `lote1`, ocupa 1 trabalhador (`1/2`) e emite `construcao.iniciada` para todos. A obra entra em contagem regressiva de 3 segundos;
-  2. O jogador B emite `construcao.solicitada` antes da conclusão da obra de A. O servidor valida e aceita sequencialmente o pedido: debita 5 cristais brutos, aloca o `lote2`, ocupa o segundo trabalhador (`2/2`) e emite `construcao.iniciada` para todos. A segunda obra entra em contagem regressiva de 3 segundos;
-  3. O jogador C emite `construcao.solicitada` enquanto ambas as obras permanecem em andamento. O servidor avalia sequencialmente o pedido, constata que o limite de trabalhadores está saturado (`2/2`) e emite `construcao.recusada` exclusivamente para o jogador C com o motivo literal:  
+  1. O jogador A emite `construcao.solicitada` (modalidade: cristais brutos). O servidor valida e aceita sequencialmente o pedido: debita 5 cristais brutos, aloca o `lote1`, ocupa 1 trabalhador (`1/2`) e emite `construcao.iniciada` para todos. A obra entra em contagem regressiva de 3 segundos;
+  2. O jogador B emite `construcao.solicitada` (modalidade: cristais brutos) antes da conclusão da obra de A. O servidor valida e aceita sequencialmente o pedido: debita 5 cristais brutos, aloca o `lote2`, ocupa o segundo trabalhador (`2/2`) e emite `construcao.iniciada` para todos. A segunda obra entra em contagem regressiva de 3 segundos;
+  3. O jogador C emite `construcao.solicitada` (modalidade: cristais brutos) enquanto ambas as obras permanecem em andamento. O servidor avalia sequencialmente o pedido, constata que o limite de trabalhadores está saturado (`2/2`) e emite `construcao.recusada` exclusivamente para o jogador C com o motivo literal:
      `Sem trabalhador livre`.  
      Nenhum cristal bruto é debitado do jogador C e nenhum lote adicional é ocupado;
   4. Transcorrem os 3 segundos da obra do jogador A. O temporizador encerra, o servidor emite `construcao.concluida` para todos, entrega a lapidária no nível 1 e **libera automaticamente 1 trabalhador**. O contador de ocupação retorna para `1/2`;
-  5. O jogador C emite novamente o pedido `construcao.solicitada`. O servidor processa o pedido, valida que há 1 trabalhador disponível (`1/2`), recursos suficientes e lote vago, aceita a construção e emite `construcao.iniciada`, ocupando o trabalhador liberado e elevando o contador novamente para `2/2`,
+  5. O jogador C emite novamente o pedido `construcao.solicitada` (modalidade: cristais brutos). O servidor processa o pedido, valida que há 1 trabalhador disponível (`1/2`), recursos suficientes e lote vago, aceita a construção e emite `construcao.iniciada`, ocupando o trabalhador liberado e elevando o contador novamente para `2/2`,
 - **então** fica plenamente verificado que o limite global de 2 trabalhadores é rigidamente mantido pelo servidor em todas as transições, sem permitir extrapolação de obras simultâneas.

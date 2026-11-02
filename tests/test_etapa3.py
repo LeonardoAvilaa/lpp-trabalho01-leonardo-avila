@@ -56,13 +56,13 @@ class TestEtapa3EmProcesso(unittest.IsolatedAsyncioTestCase):
         server.vila["brutos"] = saldo_brutos
         return m1
 
-    # 1. Construção válida completa: início, transição e conclusão
+    # 1. Construção válida completa: início, transição e conclusão (cristais brutos)
     async def test_01_construcao_valida_completa(self):
         await self.abrir_vila_com_saldo(5)
         j1 = await self.conectar_jogador("j1", "Ana")
 
         with patch.object(server, "TEMPO_OBRA", 0.03):
-            await server.solicitar_construcao(j1)
+            await server.solicitar_construcao(j1, {"modalidade": "brutos"})
 
             # Estado imediato no início da obra
             self.assertEqual(server.vila["brutos"], 0)
@@ -79,6 +79,7 @@ class TestEtapa3EmProcesso(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(p_ini["lapidaria_id"], "lapidaria-1")
             self.assertEqual(p_ini["lote"], "lote1")
             self.assertEqual(p_ini["custo"], 5)
+            self.assertEqual(p_ini["modalidade"], "brutos")
             self.assertEqual(p_ini["causa"], "construcao.solicitada")
             self.assertIn("estado", p_ini)
 
@@ -105,6 +106,40 @@ class TestEtapa3EmProcesso(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(p_conc["situacao"], "disponível")
             self.assertEqual(p_conc["causa"], "temporizador")
             self.assertEqual(p_conc["estado"]["lapidarias"]["lapidaria-1"]["situacao"], "disponível")
+
+    # 1b. Construção válida completa com cristais lapidados
+    async def test_01b_construcao_valida_completa_lapidados(self):
+        await self.abrir_vila_com_saldo(0)
+        server.vila["lapidados"] = 5
+        j1 = await self.conectar_jogador("j1", "Bruno")
+
+        with patch.object(server, "TEMPO_OBRA", 0.03):
+            await server.solicitar_construcao(j1, {"modalidade": "lapidados"})
+
+            # Estado imediato no início da obra: consome lapidados, preserva brutos
+            self.assertEqual(server.vila["lapidados"], 0)
+            self.assertEqual(server.vila["brutos"], 0)
+            self.assertEqual(server.vila["trabalhadores"], 1)
+            self.assertEqual(server.vila["lotes"]["lote1"], "lapidaria-1")
+            self.assertEqual(server.vila["lapidarias"]["lapidaria-1"]["situacao"], "em construção")
+
+            # Evento construcao.iniciada
+            chamadas_ini = [c for c in self.emit.call_args_list if c.args[0] == "construcao.iniciada"]
+            self.assertEqual(len(chamadas_ini), 1)
+            p_ini = chamadas_ini[0].args[1]
+            self.assertEqual(p_ini["solicitante"], "Bruno")
+            self.assertEqual(p_ini["lapidaria_id"], "lapidaria-1")
+            self.assertEqual(p_ini["lote"], "lote1")
+            self.assertEqual(p_ini["custo"], 5)
+            self.assertEqual(p_ini["modalidade"], "lapidados")
+            self.assertEqual(p_ini["causa"], "construcao.solicitada")
+
+            await asyncio.sleep(0.06)
+
+            self.assertEqual(server.vila["trabalhadores"], 0)
+            lap = server.vila["lapidarias"]["lapidaria-1"]
+            self.assertEqual(lap["situacao"], "disponível")
+            self.assertEqual(lap["nivel"], 1)
 
     # 2. Recusa quando solicitante não tem papel "jogador"
     async def test_02_recusa_solicitante_nao_jogador(self):
@@ -154,13 +189,87 @@ class TestEtapa3EmProcesso(unittest.IsolatedAsyncioTestCase):
         await self.abrir_vila_com_saldo(4)  # 4 < 5
         j1 = await self.conectar_jogador("j1")
 
-        await server.solicitar_construcao(j1)
+        # Recusa para brutos com saldo 4
+        await server.solicitar_construcao(j1, {"modalidade": "brutos"})
         self.assertEqual(server.vila["brutos"], 4)
         self.assertEqual(server.vila["trabalhadores"], 0)
 
         chamadas = [c for c in self.emit.call_args_list if c.args[0] == "construcao.recusada"]
         self.assertEqual(len(chamadas), 1)
         self.assertIn("insuficientes", chamadas[0].args[1]["motivo"])
+
+        # Recusa para lapidados com saldo 4
+        self.emit.reset_mock()
+        server.vila["lapidados"] = 4
+        await server.solicitar_construcao(j1, {"modalidade": "lapidados"})
+        self.assertEqual(server.vila["lapidados"], 4)
+        self.assertEqual(server.vila["trabalhadores"], 0)
+
+        chamadas = [c for c in self.emit.call_args_list if c.args[0] == "construcao.recusada"]
+        self.assertEqual(len(chamadas), 1)
+        self.assertIn("insuficientes", chamadas[0].args[1]["motivo"])
+
+    # 4b. Ausência de débito no recurso não escolhido
+    async def test_04b_ausencia_de_debito_no_recurso_nao_escolhido(self):
+        await self.abrir_vila_com_saldo(10)
+        server.vila["lapidados"] = 10
+        j1 = await self.conectar_jogador("j1")
+
+        with patch.object(server, "TEMPO_OBRA", 10.0):
+            # Constrói com brutos: apenas brutos são debitados
+            await server.solicitar_construcao(j1, {"modalidade": "brutos"})
+            self.assertEqual(server.vila["brutos"], 5)
+            self.assertEqual(server.vila["lapidados"], 10)
+
+            # Constrói com lapidados: apenas lapidados são debitados
+            await server.solicitar_construcao(j1, {"modalidade": "lapidados"})
+            self.assertEqual(server.vila["brutos"], 5)
+            self.assertEqual(server.vila["lapidados"], 5)
+
+    # 4c. Recusa de modalidade inválida
+    async def test_04c_recusa_modalidade_invalida(self):
+        await self.abrir_vila_com_saldo(10)
+        server.vila["lapidados"] = 10
+        j1 = await self.conectar_jogador("j1")
+
+        # Modalidade None / ausente
+        await server.solicitar_construcao(j1, None)
+        self.assertEqual(server.vila["brutos"], 10)
+        self.assertEqual(server.vila["lapidados"], 10)
+        self.assertEqual(server.vila["trabalhadores"], 0)
+        chamadas = [c for c in self.emit.call_args_list if c.args[0] == "construcao.recusada"]
+        self.assertEqual(len(chamadas), 1)
+        self.assertIn("inválida", chamadas[0].args[1]["motivo"])
+
+        # Modalidade desconhecida
+        self.emit.reset_mock()
+        await server.solicitar_construcao(j1, {"modalidade": "ouro"})
+        self.assertEqual(server.vila["brutos"], 10)
+        self.assertEqual(server.vila["lapidados"], 10)
+        self.assertEqual(server.vila["trabalhadores"], 0)
+        chamadas = [c for c in self.emit.call_args_list if c.args[0] == "construcao.recusada"]
+        self.assertEqual(len(chamadas), 1)
+        self.assertIn("inválida", chamadas[0].args[1]["motivo"])
+
+        # Formato string direta (recusado pelo contrato exclusivo)
+        self.emit.reset_mock()
+        await server.solicitar_construcao(j1, "brutos")
+        self.assertEqual(server.vila["brutos"], 10)
+        self.assertEqual(server.vila["lapidados"], 10)
+        self.assertEqual(server.vila["trabalhadores"], 0)
+        chamadas = [c for c in self.emit.call_args_list if c.args[0] == "construcao.recusada"]
+        self.assertEqual(len(chamadas), 1)
+        self.assertIn("inválida", chamadas[0].args[1]["motivo"])
+
+        # Formato com campo alternativo 'recurso' (recusado pelo contrato exclusivo)
+        self.emit.reset_mock()
+        await server.solicitar_construcao(j1, {"recurso": "brutos"})
+        self.assertEqual(server.vila["brutos"], 10)
+        self.assertEqual(server.vila["lapidados"], 10)
+        self.assertEqual(server.vila["trabalhadores"], 0)
+        chamadas = [c for c in self.emit.call_args_list if c.args[0] == "construcao.recusada"]
+        self.assertEqual(len(chamadas), 1)
+        self.assertIn("inválida", chamadas[0].args[1]["motivo"])
 
     # 5. Recusa por limite de trabalhadores atingido (2/2)
     async def test_05_recusa_limite_trabalhadores(self):
@@ -169,13 +278,13 @@ class TestEtapa3EmProcesso(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(server, "TEMPO_OBRA", 10.0):
             # Inicia 2 construções
-            await server.solicitar_construcao(j1)
-            await server.solicitar_construcao(j1)
+            await server.solicitar_construcao(j1, {"modalidade": "brutos"})
+            await server.solicitar_construcao(j1, {"modalidade": "brutos"})
             self.assertEqual(server.vila["trabalhadores"], 2)
 
             self.emit.reset_mock()
             # Tenta terceira
-            await server.solicitar_construcao(j1)
+            await server.solicitar_construcao(j1, {"modalidade": "brutos"})
             self.assertEqual(server.vila["trabalhadores"], 2)
             self.assertEqual(server.vila["brutos"], 10)
 
@@ -192,7 +301,7 @@ class TestEtapa3EmProcesso(unittest.IsolatedAsyncioTestCase):
         for lote in server.LOTES:
             server.vila["lotes"][lote] = "outra-lapidaria"
 
-        await server.solicitar_construcao(j1)
+        await server.solicitar_construcao(j1, {"modalidade": "brutos"})
         self.assertEqual(server.vila["brutos"], 10)
         self.assertEqual(server.vila["trabalhadores"], 0)
 
@@ -209,8 +318,8 @@ class TestEtapa3EmProcesso(unittest.IsolatedAsyncioTestCase):
         with patch.object(server, "TEMPO_OBRA", 10.0):
             # Dispara duas solicitações quase simultâneas
             await asyncio.gather(
-                server.solicitar_construcao(j1),
-                server.solicitar_construcao(j2),
+                server.solicitar_construcao(j1, {"modalidade": "brutos"}),
+                server.solicitar_construcao(j2, {"modalidade": "brutos"}),
             )
 
         # Apenas 1 obra deve ter sido iniciada
@@ -223,15 +332,40 @@ class TestEtapa3EmProcesso(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(chamadas_ini), 1)
         self.assertEqual(len(chamadas_rec), 1)
 
+    # 7b. Concorrência sequencial com cristais lapidados
+    async def test_07b_concorrencia_sequencial_lapidados_sem_gasto_duplicado(self):
+        await self.abrir_vila_com_saldo(0)
+        server.vila["lapidados"] = 5
+        j1 = await self.conectar_jogador("j1", "Jogador1")
+        j2 = await self.conectar_jogador("j2", "Jogador2")
+
+        with patch.object(server, "TEMPO_OBRA", 10.0):
+            await asyncio.gather(
+                server.solicitar_construcao(j1, {"modalidade": "lapidados"}),
+                server.solicitar_construcao(j2, {"modalidade": "lapidados"}),
+            )
+
+        self.assertEqual(server.vila["lapidados"], 0)
+        self.assertEqual(server.vila["brutos"], 0)
+        self.assertEqual(server.vila["trabalhadores"], 1)
+
+        chamadas_ini = [c for c in self.emit.call_args_list if c.args[0] == "construcao.iniciada"]
+        chamadas_rec = [c for c in self.emit.call_args_list if c.args[0] == "construcao.recusada"]
+        self.assertEqual(len(chamadas_ini), 1)
+        self.assertEqual(len(chamadas_rec), 1)
+
     # 8. Construções simultâneas em lotes distintos
     async def test_08_construcoes_simultaneas_em_lotes_distintos(self):
-        await self.abrir_vila_com_saldo(10)
+        await self.abrir_vila_com_saldo(5)
+        server.vila["lapidados"] = 5
         j1 = await self.conectar_jogador("j1")
 
         with patch.object(server, "TEMPO_OBRA", 10.0):
-            await server.solicitar_construcao(j1)
-            await server.solicitar_construcao(j1)
+            await server.solicitar_construcao(j1, {"modalidade": "brutos"})
+            await server.solicitar_construcao(j1, {"modalidade": "lapidados"})
 
+        self.assertEqual(server.vila["brutos"], 0)
+        self.assertEqual(server.vila["lapidados"], 0)
         self.assertEqual(server.vila["trabalhadores"], 2)
         self.assertEqual(server.vila["lotes"]["lote1"], "lapidaria-1")
         self.assertEqual(server.vila["lotes"]["lote2"], "lapidaria-2")
@@ -243,7 +377,7 @@ class TestEtapa3EmProcesso(unittest.IsolatedAsyncioTestCase):
         j1 = await self.conectar_jogador("j1")
 
         with patch.object(server, "TEMPO_OBRA", 0.03):
-            await server.solicitar_construcao(j1)
+            await server.solicitar_construcao(j1, {"modalidade": "brutos"})
             # Jogador desconecta durante a obra
             await server.disconnect(j1)
 
@@ -261,7 +395,7 @@ class TestEtapa3EmProcesso(unittest.IsolatedAsyncioTestCase):
         j1 = await self.conectar_jogador("j1")
 
         with patch.object(server, "TEMPO_OBRA", 0.04):
-            await server.solicitar_construcao(j1)
+            await server.solicitar_construcao(j1, {"modalidade": "brutos"})
 
             # Mestre encerra a temporada durante a obra
             await asyncio.sleep(0.01)
@@ -388,8 +522,8 @@ class TestProtocoloSocketIOEtapa3(unittest.TestCase):
 
         jogador.coletar_ate(tem_5_producoes, limite=12.0)
 
-        # Jogador solicita construção
-        jogador.emitir("construcao.solicitada")
+        # Jogador solicita construção com cristais brutos
+        jogador.emitir("construcao.solicitada", {"modalidade": "brutos"})
         jogador.coletar_ate(tem_evento("construcao.iniciada"), limite=3.0)
 
         eventos = ClienteEngineIO.eventos(jogador.pacotes)

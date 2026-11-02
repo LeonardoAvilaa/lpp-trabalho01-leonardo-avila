@@ -937,18 +937,19 @@ class TestEtapa61Cliente(unittest.TestCase):
         """Verificação estática de client/index.html para os elementos e bindings da construção de lapidárias."""
         html_content = (RAIZ / "client" / "index.html").read_text(encoding="utf-8")
 
-        # Botão de construção com diretiva :disabled e handler @click
-        self.assertIn(':disabled="comandoConstrucaoPendente" @click="construir">🔨 Construir</button>', html_content)
+        # Botões de construção com diretiva :disabled e handler @click
+        self.assertIn(':disabled="comandoConstrucaoPendente || estado.brutos < 5" @click="construir(\'brutos\')">💎 Construir com 5 cristais brutos</button>', html_content)
+        self.assertIn(':disabled="comandoConstrucaoPendente || estado.lapidados < 5" @click="construir(\'lapidados\')">✨ Construir com 5 cristais lapidados</button>', html_content)
 
         # Definição e exportação do estado reativo
         self.assertIn("const comandoConstrucaoPendente = ref(false);", html_content)
         self.assertIn("comandoConstrucaoPendente,", html_content)
 
         # Função construir com guardas de conexão, papel, fase e pendência
-        self.assertIn("function construir()", html_content)
+        self.assertIn("function construir(modalidade)", html_content)
         self.assertIn('papel.value !== "jogador"', html_content)
         self.assertIn('estado.fase !== "aberta"', html_content)
-        self.assertIn('pedir("construcao.solicitada")', html_content)
+        self.assertIn('pedir("construcao.solicitada"', html_content)
 
         # Três listeners de construção registrados
         self.assertIn('ouvir("construcao.iniciada"', html_content)
@@ -959,7 +960,7 @@ class TestEtapa61Cliente(unittest.TestCase):
         self.assertIn('d.solicitante === nome.value', html_content)
 
     def test_22_verificacao_contrato_funcao_construir_guardas_e_bloqueio_duplicado(self):
-        """Verificação isolada de lógica: guardas da função construir(), envio sem payload e trava contra cliques duplicados."""
+        """Verificação isolada de lógica: guardas da função construir(), envio com payload de modalidade e trava contra cliques duplicados."""
         js_code = r"""
         const pedidos = [];
         let socket = null;
@@ -971,45 +972,46 @@ class TestEtapa61Cliente(unittest.TestCase):
             pedidos.push({ nome, dados: dados === undefined ? null : dados });
         }
 
-        function construir() {
+        function construir(modalidade) {
             if (!socket || !socket.connected || papel !== "jogador" || fase !== "aberta" || comandoConstrucaoPendente) return;
+            if (modalidade !== "brutos" && modalidade !== "lapidados") return;
             comandoConstrucaoPendente = true;
-            pedir("construcao.solicitada");
+            pedir("construcao.solicitada", { modalidade });
         }
 
         const log = {};
 
         // 1. Socket nulo -> não emite
-        construir();
+        construir("brutos");
         log.socketNulo = { pedidos: pedidos.length, pendente: comandoConstrucaoPendente };
 
         // 2. Socket desconectado -> não emite
         socket = { connected: false };
-        construir();
+        construir("brutos");
         log.socketDesconectado = { pedidos: pedidos.length, pendente: comandoConstrucaoPendente };
 
         // 3. Papel diferente de jogador (ex: mestre) -> não emite
         socket = { connected: true };
         papel = "mestre";
-        construir();
+        construir("brutos");
         log.papelInvalido = { pedidos: pedidos.length, pendente: comandoConstrucaoPendente };
 
         // 4. Fase diferente de aberta (ex: aguardando) -> não emite
         papel = "jogador";
         fase = "aguardando";
-        construir();
+        construir("brutos");
         log.faseAguardando = { pedidos: pedidos.length, pendente: comandoConstrucaoPendente };
 
-        // 5. Condições válidas -> emite pedido sem payload obrigatório e ativa pendência
+        // 5. Condições válidas -> emite pedido com payload de modalidade e ativa pendência
         fase = "aberta";
-        construir();
+        construir("brutos");
         log.construirValido = {
             pedidos: [...pedidos],
             pendente: comandoConstrucaoPendente
         };
 
         // 6. Segundo clique consecutivo com pendência ativa -> bloqueado
-        construir();
+        construir("brutos");
         log.duploClique = {
             pedidos: [...pedidos],
             pendente: comandoConstrucaoPendente
@@ -1033,10 +1035,10 @@ class TestEtapa61Cliente(unittest.TestCase):
         self.assertEqual(res["faseAguardando"]["pedidos"], 0)
         self.assertFalse(res["faseAguardando"]["pendente"])
 
-        # Chamada válida emite sem payload adicional e ativa pendência
+        # Chamada válida emite com payload e ativa pendência
         self.assertEqual(len(res["construirValido"]["pedidos"]), 1)
         self.assertEqual(res["construirValido"]["pedidos"][0]["nome"], "construcao.solicitada")
-        self.assertIsNone(res["construirValido"]["pedidos"][0]["dados"])
+        self.assertEqual(res["construirValido"]["pedidos"][0]["dados"], {"modalidade": "brutos"})
         self.assertTrue(res["construirValido"]["pendente"])
 
         # Segundo clique consecutivo é bloqueado
@@ -2121,6 +2123,79 @@ class TestEtapa61Cliente(unittest.TestCase):
         self.assertFalse(res["aposRecusaBob"]["bobPendente"])
         self.assertIsNone(res["aposRecusaBob"]["bobSolicitacaoId"])
         self.assertIn("não está disponível", res["aposRecusaBob"]["bobUltimoAviso"])
+
+    def test_32_verificacao_reconstrucao_estado_obra_em_construcao_e_documentacao_contrato(self):
+        """Verificação comportamental da reconstrução de obra em andamento pelo snapshot e conferência documental do payload."""
+        html_content = (RAIZ / "client" / "index.html").read_text(encoding="utf-8")
+
+        # 1. Verificação estática estrita em client/index.html
+        self.assertIn('lap.situacao === "em construção"', html_content)
+        self.assertNotIn('lap.situacao === "em_construcao"', html_content)
+
+        # 2. Verificação comportamental via Node.js da lógica de reconstrução do snapshot em mostrarEstado()
+        js_code = r"""
+        const chamadasObra = [];
+        const chamadasLapidaria = [];
+
+        const fakeScene = {
+            criarOuAtualizarObra(lid, lote, duracao) {
+                chamadasObra.push({ lid, lote, duracao });
+            },
+            criarOuAtualizarLapidaria(lid, lote, nivel, animar) {
+                chamadasLapidaria.push({ lid, lote, nivel, animar });
+            },
+            mostrarEstado(estado) {
+                if (!estado || !estado.lapidarias) return;
+                Object.values(estado.lapidarias).forEach((lap) => {
+                    if (lap.situacao === "em construção") {
+                        let duracao = 3000;
+                        if (estado.construcoes && Array.isArray(estado.construcoes)) {
+                            const c = estado.construcoes.find((item) => item.lid === lap.id);
+                            if (c && c.tempo_restante !== undefined) duracao = Math.max(0, c.tempo_restante * 1000);
+                        }
+                        this.criarOuAtualizarObra(lap.id, lap.lote, duracao);
+                    } else {
+                        this.criarOuAtualizarLapidaria(lap.id, lap.lote, lap.nivel || 1, false);
+                    }
+                });
+            }
+        };
+
+        // Snapshot emitido pelo servidor enquanto lapidaria-1 está em construção (restam 1.8s) e lapidaria-2 concluída
+        const snapshotServidor = {
+            fase: "aberta",
+            lapidarias: {
+                "lapidaria-1": { id: "lapidaria-1", lote: "lote1", nivel: 1, situacao: "em construção" },
+                "lapidaria-2": { id: "lapidaria-2", lote: "lote2", nivel: 1, situacao: "disponível" }
+            },
+            construcoes: [
+                { lid: "lapidaria-1", tempo_restante: 1.8 }
+            ]
+        };
+
+        fakeScene.mostrarEstado(snapshotServidor);
+
+        console.log(JSON.stringify({ chamadasObra, chamadasLapidaria }));
+        """
+        proc = subprocess.run(["node", "-e", js_code], capture_output=True, text=True, check=True)
+        res = json.loads(proc.stdout.strip())
+
+        # Obra em construção deve instanciar canteiro de obra e NÃO lapidária concluída
+        self.assertEqual(len(res["chamadasObra"]), 1)
+        self.assertEqual(res["chamadasObra"][0]["lid"], "lapidaria-1")
+        self.assertEqual(res["chamadasObra"][0]["lote"], "lote1")
+        self.assertEqual(res["chamadasObra"][0]["duracao"], 1800)
+
+        # Apenas a lapidária disponível é instanciada como concluída
+        self.assertEqual(len(res["chamadasLapidaria"]), 1)
+        self.assertEqual(res["chamadasLapidaria"][0]["lid"], "lapidaria-2")
+        self.assertEqual(res["chamadasLapidaria"][0]["nivel"], 1)
+
+        # 3. Verificação documental em docs/especificacao.md
+        doc_content = (RAIZ / "docs" / "especificacao.md").read_text(encoding="utf-8")
+        self.assertIn("construcao.solicitada", doc_content)
+        self.assertIn("sid", doc_content)
+        self.assertIn("não é enviado pelo cliente no payload", doc_content)
 
 
 if __name__ == "__main__":
